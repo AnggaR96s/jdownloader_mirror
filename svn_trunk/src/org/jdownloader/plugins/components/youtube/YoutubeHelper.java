@@ -2854,6 +2854,7 @@ public class YoutubeHelper {
             }
         }
         if (ret != null) {
+            ret = ret.replaceFirst("player_.*?.vflset", "player_ias.vflset");
             return br.getURL(ret).toExternalForm();
         } else {
             return null;
@@ -4402,11 +4403,11 @@ public class YoutubeHelper {
         return channelURL;
     }
 
-    public static String generateContentURL(final String videoID) {
-        return generateVideoContentURL(videoID, null, -1);
+    public static String generateSingleVideoContentURL(final String videoID) {
+        return generateSingleVideoContentURL(videoID, null, -1);
     }
 
-    public static String generateVideoContentURL(final String videoID, final String playlistID, final int playlistPosition) {
+    public static String generateSingleVideoContentURL(final String videoID, final String playlistID, final int playlistPosition) {
         String url = getBaseURL() + "/watch?v=" + videoID;
         if (playlistID != null) {
             url += "&list=" + playlistID;

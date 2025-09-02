@@ -40,6 +40,7 @@ import jd.plugins.Account.AccountType;
 import jd.plugins.AccountInfo;
 import jd.plugins.AccountInvalidException;
 import jd.plugins.AccountRequiredException;
+import jd.plugins.AccountUnavailableException;
 import jd.plugins.DownloadLink;
 import jd.plugins.DownloadLink.AvailableStatus;
 import jd.plugins.HostPlugin;
@@ -49,7 +50,7 @@ import jd.plugins.PluginException;
 import jd.plugins.PluginForHost;
 import jd.plugins.decrypter.BangComCrawler;
 
-@HostPlugin(revision = "$Revision: 50697 $", interfaceVersion = 3, names = {}, urls = {})
+@HostPlugin(revision = "$Revision: 51432 $", interfaceVersion = 3, names = {}, urls = {})
 public class BangCom extends PluginForHost {
     public BangCom(PluginWrapper wrapper) {
         super(wrapper);
@@ -262,6 +263,7 @@ public class BangCom extends PluginForHost {
                 br.getPage(checkurl);
                 if (this.isLoggedin(br)) {
                     logger.info("Cookie login successful");
+                    checkForProblemsAfterSuccessfulLogin(br);
                     return;
                 } else {
                     logger.info("Cookie login failed");
@@ -299,8 +301,7 @@ public class BangCom extends PluginForHost {
             } else {
                 final Form loginform = br.getFormbyActionRegex(".*/login_check");
                 if (loginform == null) {
-                    logger.warning("Failed to find loginform");
-                    throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
+                    throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT, "Failed to find loginform");
                 }
                 loginform.put("_username", Encoding.urlEncode(account.getUser()));
                 loginform.put("_password", Encoding.urlEncode(account.getPass()));
@@ -320,6 +321,14 @@ public class BangCom extends PluginForHost {
             }
             logger.info("Login successful");
             account.saveCookies(this.br.getCookies(br.getHost()), "");
+            /* Login can be successful but age verification may still be required */
+            checkForProblemsAfterSuccessfulLogin(br);
+        }
+    }
+
+    private void checkForProblemsAfterSuccessfulLogin(final Browser br) throws AccountUnavailableException {
+        if (br.containsHTML("data-age-guard")) {
+            throw new AccountUnavailableException("Age verification required", 3 * 60 * 60 * 1000l);
         }
     }
 
@@ -335,13 +344,16 @@ public class BangCom extends PluginForHost {
         ai.setUnlimitedTraffic();
         /* 2023-01-31: A public API is available but so far is not of any use for us: https://api.bang.com */
         final String userJson = br.getRegex("window\\.user = (\\{.*?\\});\\s").getMatch(0);
-        boolean isSubscriptionRunning = br.containsHTML(">\\s*Click to cancel");
+        boolean isSubscriptionRunning = br.containsHTML(">\\s*Click to cancel|/cancel\"");
         final boolean isTrialSubscription = br.containsHTML(">\\s*TRIAL");
         String email = null;
         if (userJson != null) {
             final Map<String, Object> user = restoreFromString(userJson, TypeRef.MAP);
-            final Map<String, Object> accountType = (Map<String, Object>) user.get("accountType");
-            if (!isSubscriptionRunning && accountType.get("type").toString().equalsIgnoreCase("paid")) {
+            // final String lastSubscriptionId = user.get("lastSubscriptionId").toString();
+            /* 2025-09-01: This map does not exist anymore. */
+            final Map<String, Object> accountTypeMap = (Map<String, Object>) user.get("accountType");
+            final String accountType = accountTypeMap != null ? accountTypeMap.get("type").toString() : null;
+            if (!isSubscriptionRunning && "paid".equalsIgnoreCase(accountType)) {
                 isSubscriptionRunning = true;
             }
             email = (String) user.get("email");
@@ -369,6 +381,10 @@ public class BangCom extends PluginForHost {
             return ai;
         } else {
             // TODO: Find expire-date
+            /*
+             * 2025-09-02: Expire date is nowhere to be seen on their website so at this moment we can only find out if the user has an
+             * active paid subscription and use this as an indicator of his account type.
+             */
             account.setType(AccountType.PREMIUM);
         }
         return ai;

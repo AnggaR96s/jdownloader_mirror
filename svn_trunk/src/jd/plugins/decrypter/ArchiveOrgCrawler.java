@@ -15,20 +15,16 @@
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package jd.plugins.decrypter;
 
-import java.io.IOException;
-import java.lang.ref.Reference;
-import java.lang.ref.SoftReference;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.appwork.storage.SimpleMapper;
@@ -37,12 +33,14 @@ import org.appwork.utils.DebugMode;
 import org.appwork.utils.Regex;
 import org.appwork.utils.StringUtils;
 import org.appwork.utils.encoding.URLEncode;
-import org.appwork.utils.formatter.SizeFormatter;
 import org.appwork.utils.formatter.TimeFormatter;
 import org.appwork.utils.net.URLHelper;
 import org.appwork.utils.parser.UrlQuery;
 import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig;
+import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.ArchiveOrgType;
 import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.BookCrawlMode;
+import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.DeselectedTypesMode;
+import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.NonDownloadableBookPagesMode;
 import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.PlaylistCrawlMode;
 import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.SingleFileAdoptFolderStructureMode;
 import org.jdownloader.plugins.components.archiveorg.ArchiveOrgConfig.SingleFilePathNotFoundMode;
@@ -54,8 +52,6 @@ import org.jdownloader.scripting.JavaScriptEngineFactory;
 import jd.PluginWrapper;
 import jd.controlling.AccountController;
 import jd.controlling.ProgressController;
-import jd.controlling.linkcrawler.CrawledLink;
-import jd.controlling.linkcrawler.LinkCrawler;
 import jd.http.Browser;
 import jd.http.URLConnectionAdapter;
 import jd.nutils.encoding.Encoding;
@@ -74,7 +70,7 @@ import jd.plugins.components.PluginJSonUtils;
 import jd.plugins.download.HashInfo;
 import jd.plugins.hoster.ArchiveOrg;
 
-@DecrypterPlugin(revision = "$Revision: 51367 $", interfaceVersion = 2, names = { "archive.org", "subdomain.archive.org" }, urls = { "https?://(?:www\\.)?archive\\.org/((?:details|download|stream|embed)/.+|search\\?query=.+)", "https?://[^/]+\\.archive\\.org/view_archive\\.php\\?archive=[^\\&]+(?:\\&file=[^\\&]+)?" })
+@DecrypterPlugin(revision = "$Revision: 51392 $", interfaceVersion = 2, names = { "archive.org", "subdomain.archive.org" }, urls = { "https?://(?:www\\.)?archive\\.org/((?:details|download|stream|embed)/.+|search\\?query=.+)", "https?://[^/]+\\.archive\\.org/view_archive\\.php\\?archive=[^\\&]+(?:\\&file=[^\\&]+)?" })
 public class ArchiveOrgCrawler extends PluginForDecrypt {
     public ArchiveOrgCrawler(PluginWrapper wrapper) {
         super(wrapper);
@@ -94,20 +90,12 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         return br;
     }
 
-    private final Pattern PATTERN_DOWNLOAD         = Pattern.compile("https?://[^/]+/download/([\\w\\-]+).*", Pattern.CASE_INSENSITIVE);
-    private final Pattern PATTERN_SEARCH           = Pattern.compile("https?://[^/]+/search\\?query=.+", Pattern.CASE_INSENSITIVE);
-    private ArchiveOrg    hostPlugin               = null;
-    private final boolean USE_NEW_HANDLING_2024_04 = true;
+    private final Pattern PATTERN_DOWNLOAD = Pattern.compile("/download/([\\w\\-]+).*", Pattern.CASE_INSENSITIVE);
+    private final Pattern PATTERN_SEARCH   = Pattern.compile("/search\\?query=.+", Pattern.CASE_INSENSITIVE);
+    private ArchiveOrg    hostPlugin       = null;
 
     public ArrayList<DownloadLink> decryptIt(final CryptedLink param, ProgressController progress) throws Exception {
-        if (USE_NEW_HANDLING_2024_04) {
-            return crawlNEW(param);
-        } else {
-            return crawlOLD(param);
-        }
-    }
-
-    private ArrayList<DownloadLink> crawlNEW(final CryptedLink param) throws Exception {
+        /* Last revision with old website/v1 functions: 51380 */
         final String contenturl = param.getCryptedUrl();
         final String identifier;
         if (new Regex(contenturl, PATTERN_SEARCH).patternFind()) {
@@ -135,7 +123,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
      */
     public static String getIdentifierFromURL(final String url) {
         /* htmldecode because "@" of "@username" could be url-encoded. */
-        String identifier = new Regex(Encoding.htmlDecode(url), "/(?:details|embed|download|metadata|stream)/(@?[A-Za-z0-9\\-_\\.]{2,})").getMatch(0);
+        String identifier = new Regex(Encoding.htmlDecode(url), "(?i)/(?:details|embed|download|metadata|stream)/(@?[A-Za-z0-9\\-_\\.]{2,})").getMatch(0);
         return identifier;
     }
 
@@ -157,24 +145,29 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
             return this.crawlBetaSearchAPI(param.getCryptedUrl(), null, null);
         } else {
             /* Old handling */
-            final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
-            final int maxResults = cfg.getSearchTermCrawlerMaxResultsLimit();
-            if (maxResults == 0) {
-                logger.info("User disabled search term crawler -> Returning empty array");
-                return new ArrayList<DownloadLink>();
-            }
-            final UrlQuery query = UrlQuery.parse(param.getCryptedUrl());
-            String searchQuery = query.get("query");
-            if (searchQuery != null) {
-                /* Gets encoded later -> Needs to be decoded here. */
-                searchQuery = URLEncode.decodeURIComponent(searchQuery).trim();
-            }
-            if (StringUtils.isEmpty(searchQuery)) {
-                /* User supplied invalid URL. */
-                throw new DecrypterRetryException(RetryReason.FILE_NOT_FOUND, "INVALID_SEARCH_QUERY");
-            }
-            return crawlViaScrapeAPI(searchQuery, maxResults);
+            return crawlOldSearch(param);
         }
+    }
+
+    @Deprecated
+    private ArrayList<DownloadLink> crawlOldSearch(final CryptedLink param) throws Exception {
+        final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
+        final int maxResults = cfg.getSearchTermCrawlerMaxResultsLimit();
+        if (maxResults == 0) {
+            logger.info("User disabled search term crawler -> Returning empty array");
+            return new ArrayList<DownloadLink>();
+        }
+        final UrlQuery query = UrlQuery.parse(param.getCryptedUrl());
+        String searchQuery = query.get("query");
+        if (searchQuery != null) {
+            /* Gets encoded later -> Needs to be decoded here. */
+            searchQuery = URLEncode.decodeURIComponent(searchQuery).trim();
+        }
+        if (StringUtils.isEmpty(searchQuery)) {
+            /* User supplied invalid URL. */
+            throw new DecrypterRetryException(RetryReason.FILE_NOT_FOUND, "INVALID_SEARCH_QUERY");
+        }
+        return crawlViaScrapeAPI(searchQuery, maxResults);
     }
 
     /**
@@ -364,7 +357,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         final HashSet<String> dupes = new HashSet<String>();
         int totalNumberofItems = -1;
         boolean displayedSearchNotification = false;
-        do {
+        pagination: do {
             query.addAndReplace("page", Integer.toString(page));
             /* This looks to be an internally used version of public crawl/search API v2 beta, see: https://archive.org/services/swagger/ */
             brc.getPage("https://" + getHost() + "/services/search/beta/page_production/?" + query.toString());
@@ -424,7 +417,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
             logger.info("Crawled page " + page + " | Crawled new items this page: " + numberofNewItemsThisPage + " | Crawled items so far: " + ret.size() + "/" + totalNumberofItems + " | Max result limit: " + maxResults);
             if (this.isAbort()) {
                 logger.info("Stopping because: Aborted by user");
-                break;
+                break pagination;
             } else if (totalNumberofItems == 0) {
                 if (isUserProfile) {
                     throw new DecrypterRetryException(RetryReason.EMPTY_PROFILE, "EMPTY_PROFILE_" + identifier);
@@ -433,19 +426,19 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 }
             } else if (stopDueToCrawlLimitReached) {
                 logger.info("Stopping because: Reached user defined limit: " + maxResults);
-                break;
+                break pagination;
             } else if (hits.size() < maxNumberofItemsPerPageForThisRun) {
                 /* Main stop condition */
                 logger.info("Stopping because: Current page contains less items than " + maxNumberofItemsPerPageForThisRun + " --> Reached end");
-                break;
+                break pagination;
             } else if (ret.size() >= totalNumberofItems) {
                 /* Fail-safe 1 */
                 logger.info("Stopping because: Found all items: " + totalNumberofItems);
-                break;
+                break pagination;
             } else if (numberofNewItemsThisPage == 0) {
                 /* Fail-safe 2 */
                 logger.info("Stopping because: Failed to find any new items on current page");
-                break;
+                break pagination;
             } else {
                 /* Continue to next page */
                 page++;
@@ -579,7 +572,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         } catch (final PluginException e) {
             /* Desired item looks to be offline -> Decide what to return. */
             final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
-            final SingleFilePathNotFoundMode mode = cfg.getSingleFilePathNonFoundMode();
+            final SingleFilePathNotFoundMode mode = cfg.getSingleFilePathNotFoundMode();
             if (e.getLinkStatus() == LinkStatus.ERROR_FILE_NOT_FOUND && mode == SingleFilePathNotFoundMode.ADD_NOTHING_AND_DISPLAY_ADDED_URL_AS_OFFLINE && fallbackResult != null) {
                 if (fallbackResult instanceof DownloadLink) {
                     ret.add((DownloadLink) fallbackResult);
@@ -702,7 +695,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 final Object viewable = bookpage.get("viewable");
                 if (Boolean.FALSE.equals(viewable)) {
                     /* Only downloadable with account as book needs to be borrowed to view the pages. */
-                    if (PluginJsonConfig.get(ArchiveOrgConfig.class).isMarkNonViewableBookPagesAsOfflineIfNoAccountIsAvailable() && account == null) {
+                    if (account == null && PluginJsonConfig.get(ArchiveOrgConfig.class).getNonDownloadableBookPagesMode() == NonDownloadableBookPagesMode.SET_AVAILABLE_STATUS_OFFLINE) {
                         /* User wants non-downloadable items to be displayed as offline. */
                         link.setAvailable(false);
                     } else {
@@ -794,6 +787,10 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
             return this.crawlCollection(sourceurl, identifier);
         }
         final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
+        PlaylistCrawlMode playlistCrawlMode = cfg.getPlaylistCrawlMode202404();
+        if (playlistCrawlMode == PlaylistCrawlMode.DEFAULT) {
+            playlistCrawlMode = PlaylistCrawlMode.AUTO;
+        }
         final boolean isDownloadPage = sourceurl.matches("(?i)https?://[^/]+/download/.+");
         final String desiredSubpath;
         if (isDownloadPage) {
@@ -827,13 +824,11 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         final String server = root.get("server").toString();
         final String dir = root.get("dir").toString();
         final Object descriptionObject = root_metadata.get("description");
-        final String description;
+        String description = null;
         if (descriptionObject instanceof String) {
             description = (String) descriptionObject;
         } else if (descriptionObject instanceof List) {
             description = StringUtils.join((List) descriptionObject, ";");
-        } else {
-            description = null;
         }
         /* Crawl files */
         final Map<String, DownloadLink> itemMapping = new HashMap<String, DownloadLink>();
@@ -843,18 +838,10 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         DownloadLink singleDesiredFile = null;
         DownloadLink singleDesiredFile2 = null;
         final ArrayList<DownloadLink> selectedItems = new ArrayList<DownloadLink>();
-        /* FilPackage for all file items that are contained in the root of this identifiers' filesystem. */
-        final FilePackage fpRoot = FilePackage.getInstance();
-        fpRoot.setName(identifier);
-        if (!StringUtils.isEmpty(description)) {
-            fpRoot.setComment(description);
-        }
         final Map<String, FilePackage> packagemap = new HashMap<String, FilePackage>();
-        packagemap.put(identifier, fpRoot);
-        // final Set<ArchiveOrgType> selectedTypes = cfg.getTypesToCrawl();
-        final boolean crawlOriginalFilesOnly = cfg.isFileCrawlerCrawlOnlyOriginalVersions();
-        final boolean crawlMetadataFiles = cfg.isFileCrawlerCrawlMetadataFiles();
-        final boolean crawlThumbnails = cfg.isFileCrawlerCrawlThumbnails();
+        final Set<ArchiveOrgType> selectedTypes = cfg.getFileCrawlerTypesToCrawl();
+        final boolean skipDeselectedItems = cfg.getDeselectedTypesLinksMode() == DeselectedTypesMode.DO_NOT_ADD_SKIP;
+        final boolean crawlOriginalFilesOnly = selectedTypes.size() == 1 && selectedTypes.contains(ArchiveOrgType.ORIGINAL);
         final List<String> skippedItemsFilepaths = new ArrayList<String>();
         String totalLengthSecondsOriginalStr = null;
         String totalLengthSecondsDerivativeStr = null;
@@ -864,24 +851,73 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         final boolean isAccessRestricted = StringUtils.equalsIgnoreCase((String) root_metadata.get("access-restricted-item"), "true");
         /* If this gets set to true, we expect 60 second video streams to be available. */
         boolean identifierDotMp4Exists = false;
-        logger.info("Crawling all files below path: " + desiredSubpathDecoded);
+        logger.info("Crawling all (selected) files below path: " + desiredSubpathDecoded);
+        if (selectedTypes.isEmpty()) {
+            logger.info("User has deselected all types -> Adding all instead");
+        }
         for (final Map<String, Object> filemap : root_files) {
             final String source = filemap.get("source").toString(); // "original", "derivative" or "metadata"
             final String format = (String) filemap.get("format");
             /* Boolean as string */
             final boolean isOldVersion = StringUtils.equalsIgnoreCase((String) filemap.get("old_version"), "true");
-            final boolean isOriginal = source.equalsIgnoreCase("original");
-            final boolean isMetadata = StringUtils.equalsIgnoreCase(format, "metadata");
-            final boolean isThumbnail = StringUtils.equalsIgnoreCase(format, "Thumbnail");
-            // final boolean isArchiveViewSupported = false; // TODO: Check this
+            final String name = filemap.get("name").toString();
             final Object originalO = filemap.get("original");
+            /**
+             * Determine type of this item. <br>
+             * Important: Check for thumbnail first!! <br>
+             * A thumbnail is also a devivative! <br>
+             * Items with source "original" can at the same time contain "format" with value "Metadata" so check for original only after
+             * checking for metadata!
+             */
+            ArchiveOrgType thistype = null;
+            if (StringUtils.equalsIgnoreCase(format, "Thumbnail")) {
+                thistype = ArchiveOrgType.THUMBNAIL;
+            } else if (StringUtils.equalsIgnoreCase(format, "metadata")) {
+                thistype = ArchiveOrgType.METADATA;
+            } else if (source.equalsIgnoreCase("metadata")) {
+                if (name.matches("(?i).+\\.torrent$")) {
+                    thistype = ArchiveOrgType.METADATA_TORRENT;
+                } else {
+                    thistype = ArchiveOrgType.METADATA;
+                }
+            } else if (source.equalsIgnoreCase("original")) {
+                if (StringUtils.endsWithCaseInsensitive(name, "__ia_thumb.jpg")) {
+                    /* Special detection for unmarked thumbnails e.g. /download/MSNBCW_20211108_030000_Four_Seasons_Total_Documentary */
+                    thistype = ArchiveOrgType.THUMBNAIL;
+                } else {
+                    thistype = ArchiveOrgType.ORIGINAL;
+                }
+            } else if (source.equalsIgnoreCase("derivative")) {
+                if ("Columbia Peaks".equals(format)) {
+                    // https://help.archive.org/help/audio-and-music-items-a-basic-guide/
+                    // Columbia Peaks: .afpk are audio fingerprint files created by running the audfprint package by Prof Daniel Ellis from
+                    // Columbia University.
+                    thistype = ArchiveOrgType.DERIVATIVE_PEAKS;
+                } else if ("Spectrogram".equals(format)) {
+                    // https://help.archive.org/help/audio-and-music-items-a-basic-guide/
+                    // Spectogram: a visual representation of the spectrum of frequencies of sound or other signals as they vary with time.
+                    thistype = ArchiveOrgType.DERIVATIVE_SPECTROGRAM;
+                } else if (name.matches("(?i).+\\.(png|jpg)$") && originalO instanceof String && ((String) originalO).matches("(?i).+\\.(mp3|ogg|flac|mp4|mkv|wav|opus)$") && !"Spectrogram".equals(format)) {
+                    thistype = ArchiveOrgType.DERIVATIVE_COVER;
+                } else {
+                    thistype = ArchiveOrgType.DERIVATIVE;
+                }
+            } else {
+                /* This should never happen */
+                logger.warning("Found unknown source/type: " + source);
+            }
+            final boolean userWantsItem = thistype == null || selectedTypes.isEmpty() || selectedTypes.contains(thistype);
             /* Boolean as string */
             final boolean isAccountRequiredForDownload = StringUtils.equalsIgnoreCase((String) filemap.get("private"), "true");
-            final String name = filemap.get("name").toString();
             String pathWithFilename = name;
             if (Encoding.isHtmlEntityCoded(pathWithFilename)) {
                 /* Will sometimes contain "&amp;" */
                 pathWithFilename = Encoding.htmlOnlyDecode(pathWithFilename);
+            }
+            if (isOldVersion) {
+                /* Skip old elements otherwise we run into the danger of adding the same item multiple times. */
+                skippedItemsFilepaths.add(pathWithFilename);
+                continue;
             }
             if (!identifierDotMp4Exists && pathWithFilename.equals(identifier + ".mp4")) {
                 identifierDotMp4Exists = true;
@@ -918,17 +954,17 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 pathToCurrentFolder = identifier;
                 filename = pathWithFilename;
             }
-            final Object fileSizeO = filemap.get("size");
             String url = "https://" + getHost() + "/download/" + identifier;
             if (pathWithFilename.startsWith("/")) {
                 url += URLEncode.encodeURIComponent(pathWithFilename);
             } else {
                 url += "/" + URLEncode.encodeURIComponent(pathWithFilename);
             }
+            /* Directurl is not needed here because the "/download/..." URL will redirect to it later on download attempt. */
             // final String directurl = "https://" + server + dir + "/" + URLEncode.encodeURIComponent(pathWithFilename);
             final DownloadLink file = this.createDownloadlink(url);
             itemMapping.put(name, file);
-            if (isOriginal) {
+            if (thistype == ArchiveOrgType.ORIGINAL) {
                 originalMapping.put(name, null);
                 if (totalLengthSecondsOriginalStr == null) {
                     totalLengthSecondsOriginalStr = (String) filemap.get("length");
@@ -944,6 +980,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
             file.setProperty(ArchiveOrg.PROPERTY_TITLE, filemap.get("title")); // Optional field
             file.setProperty(ArchiveOrg.PROPERTY_ARTIST, filemap.get("artist")); // optional field
             file.setProperty(ArchiveOrg.PROPERTY_GENRE, filemap.get("genre")); // optional field
+            final Object fileSizeO = filemap.get("size");
             if (fileSizeO != null) {
                 if (fileSizeO instanceof Number) {
                     file.setVerifiedFileSize(((Number) fileSizeO).longValue());
@@ -979,9 +1016,13 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
             if (fp == null) {
                 fp = FilePackage.getInstance();
                 fp.setName(pathToCurrentFolder);
+                fp.setComment(description);
                 packagemap.put(pathToCurrentFolder, fp);
             }
             file._setFilePackage(fp);
+            /* Disables unwanted items -> They will be greyed out in GUI */
+            file.setEnabled(userWantsItem);
+            /* Add items to list of selected results. */
             final String fullPath = identifier + "/" + pathWithFilename;
             if (desiredSubpathDecoded != null) {
                 /* Add item to list of results which match our given subpath. */
@@ -998,30 +1039,15 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 desiredFileArchiveFileCount = filemap.get("filecount");
                 singleDesiredFile2 = file;
             }
-            /* Add items to list of all results. */
-            /* Check some skip conditions */
-            if (isOldVersion) {
-                /* Skip old elements. */
-                skippedItemsFilepaths.add(pathWithFilename);
-            } else if (crawlOriginalFilesOnly && !isOriginal) {
-                skippedItemsFilepaths.add(pathWithFilename);
-            } else if (isMetadata && !crawlMetadataFiles) {
-                /* Only include metadata if wished by the user. */
-                skippedItemsFilepaths.add(pathWithFilename);
-            } else if (isThumbnail && !crawlThumbnails) {
-                /* Only include thumbnails if wished by the user. */
-                skippedItemsFilepaths.add(pathWithFilename);
-            } else {
-                selectedItems.add(file);
-            }
             if (originalO instanceof String) {
                 originalFilenamesDupeCollection.add(originalO.toString());
             }
-        }
-        /* Log skipped results */
-        if (skippedItemsFilepaths.size() > 0) {
-            logger.info("Skipped file items: " + skippedItemsFilepaths.size());
-            logger.info(skippedItemsFilepaths.toString());
+            if (!userWantsItem && skipDeselectedItems) {
+                skippedItemsFilepaths.add(pathWithFilename);
+                continue;
+            } else {
+                selectedItems.add(file);
+            }
         }
         if (desiredSubpathDecoded != null) {
             if (singleDesiredFile != null) {
@@ -1036,6 +1062,8 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                     if (mode == SingleFileAdoptFolderStructureMode.DISABLE) {
                         singleDesiredFile.setRelativeDownloadFolderPath(null);
                     }
+                    /* Ensure that this item is enabled as it could have been disabled due to the users' settings. */
+                    singleDesiredFile.setEnabled(true);
                     selectedItems.add(singleDesiredFile); // Add desired result only
                     return selectedItems;
                 }
@@ -1048,11 +1076,19 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 return desiredSubpathItems;
             }
             logger.info("Failed to find single file/path: " + desiredSubpathDecoded);
-            final SingleFilePathNotFoundMode mode = cfg.getSingleFilePathNonFoundMode();
+            final SingleFilePathNotFoundMode mode = cfg.getSingleFilePathNotFoundMode();
             if (mode == SingleFilePathNotFoundMode.ADD_NOTHING_AND_DISPLAY_ADDED_URL_AS_OFFLINE) {
                 throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
             } else {
                 logger.info("Failed to find single file/path -> Adding all results instead");
+            }
+        }
+        /* Log skipped results */
+        if (skippedItemsFilepaths.size() > 0) {
+            logger.info("Skipped file items: " + skippedItemsFilepaths.size());
+            logger.info(skippedItemsFilepaths.toString());
+            if (selectedItems.isEmpty()) {
+                logger.info("All file items were skipped due to users' plugin settings");
             }
         }
         final FilePackage playlistpackage = FilePackage.getInstance();
@@ -1066,10 +1102,6 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         playlistpackage.setPackageKey("internetarchive://identifier/" + identifier + "/playlist");
         /* Build video Stream playlist if needed */
         final ArrayList<DownloadLink> videoPlaylistItems = new ArrayList<DownloadLink>();
-        PlaylistCrawlMode playlistCrawlMode = cfg.getPlaylistCrawlMode202404();
-        if (playlistCrawlMode == PlaylistCrawlMode.DEFAULT) {
-            playlistCrawlMode = PlaylistCrawlMode.AUTO;
-        }
         if (StringUtils.equalsIgnoreCase(mediatype, "texts")) {
             /* Book crawl handling */
             final BookCrawlMode mode = cfg.getBookCrawlMode();
@@ -1081,19 +1113,20 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 final String subPrefixInSourceURL = new Regex(sourceurlForThisHandling, "(?i)/details/[^/]+/([^/#\\?\\&]+)").getMatch(0);
                 for (final String str : originalFilenamesDupeCollection) {
                     final Regex chapterregex = new Regex(str, "(.+)_(djvu\\.xml|page_numbers\\.json)");
-                    if (chapterregex.patternFind()) {
-                        final String subPrefix = chapterregex.getMatch(0);
-                        subPrefixes.add(subPrefix);
+                    if (!chapterregex.patternFind()) {
+                        continue;
                     }
+                    final String subPrefix = chapterregex.getMatch(0);
+                    subPrefixes.add(subPrefix);
                 }
                 if (subPrefixes.isEmpty()) {
                     /* This should never happen */
-                    logger.warning("FATAL: Book handling failed: Failed to find any subPrefixes -> Returning original files as fallback");
+                    logger.warning("FATAL: Book handling failed: Failed to find any subPrefixes -> Returning selected files as fallback");
                     return selectedItems;
                 }
                 if (mode == BookCrawlMode.ORIGINAL_AND_LOOSE_PAGES) {
                     /*
-                     * Make original files already appear in linkgrabber now already because crawling loose book pages can take a LOT of
+                     * Make selected files already appear in linkgrabber now already because crawling loose book pages can take a LOT of
                      * time.
                      */
                     distribute(selectedItems);
@@ -1101,7 +1134,7 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 ensureInitHosterplugin();
                 final Account account = AccountController.getInstance().getValidAccount(hostPlugin.getHost());
                 if (account != null) {
-                    /* Login if possible as this can have an influence on the books' 'lending-status'. */
+                    /* Login if possible as this can have an influence on the books' "lending-status". */
                     hostPlugin.login(account, false);
                 }
                 logger.info("Crawling book with " + subPrefixes.size() + " subPrefixes | subPrefixInSourceURL = " + subPrefixInSourceURL);
@@ -1132,26 +1165,21 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                         position++;
                     }
                 }
-                if (mode == BookCrawlMode.ORIGINAL_AND_LOOSE_PAGES) {
-                    /*
-                     * User also wants to have original book files -> Add loose book pages to our results and return all results.
-                     */
-                    selectedItems.addAll(bookResults);
-                    return selectedItems;
-                } else {
-                    /* Return loose pages only */
-                    return bookResults;
-                }
+                /**
+                 * Return loose pages only <br>
+                 * If user also wants file items, they've already been returned via "distribute" method.
+                 */
+                return bookResults;
             } else {
                 // BookCrawlMode.PREFER_ORIGINAL
-                /* Fall through and return original files */
+                /* Fall through and return selected files */
             }
         } else if (StringUtils.equalsIgnoreCase(mediatype, "movies") && identifierDotMp4Exists) {
             /* Video "playlist" handling */
             if (totalLengthSecondsOriginalStr == null || !totalLengthSecondsOriginalStr.matches("\\d+(\\.\\d+)?")) {
                 /* This should never happen */
                 logger.warning("Detected mediatype 'movies' item but failed to determine video playtime");
-                /* Return original files */
+                /* Fallback: return selected files */
                 return selectedItems;
             }
             final int secondsPerSegment = 60;
@@ -1210,11 +1238,18 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                 selectedItems.addAll(videoPlaylistItems);
             } else {
                 /* Do not return any playlist items but only original files. */
-                logger.info("Skipping video playlist because user wants original files only");
+                logger.info("Skipping video playlist because user wants original/selected files only");
             }
         } else if (audioPlaylistItems.size() > 0) {
             /* Audio playlist handling */
             // final boolean isAudioPlaylist = mediatype.equalsIgnoreCase("audio");
+            /**
+             * The code down below finds the original files that match the titles you can see in the playlist on the archive.org website.
+             * This ensures that we get the best of both worlds: <br>
+             * - Original file <br>
+             * - Original file size <br>
+             * - Same order as on website (see ArchiveOrg.PROPERTY_PLAYLIST_POSITION)
+             */
             final int playlistSize = audioPlaylistItems.size();
             final ArrayList<DownloadLink> audioPlaylistFinalResults = new ArrayList<DownloadLink>();
             final ListIterator<String> li = audioPlaylistItems.listIterator();
@@ -1242,33 +1277,35 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
                     final DownloadLink item = itemMapping.get(entryName);
                     final DownloadLink audioPlaylistLink = this.createDownloadlink(item.getPluginPatternMatcher());
                     audioPlaylistLink.setProperties(item.getProperties());
-                    /* Remove relative folder path set on original item otherwise playlist results will go into different packages! */
+                    /* Remove relative folder path set on original item otherwise playlist results won't go into our desired package! */
                     audioPlaylistLink.setRelativeDownloadFolderPath(null);
                     /*
-                     * Add playlist specific properties so hosterplugin "knows" that this item is part of a playlist and cand set filenames
+                     * Add playlist specific properties so hosterplugin "knows" that this item is part of a playlist and can set filenames
                      * accordingly.
                      */
                     audioPlaylistLink.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_POSITION, itemPosition);
                     audioPlaylistLink.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_SIZE, playlistSize);
                     audioPlaylistLink.setProperty(ArchiveOrg.PROPERTY_FILETYPE, ArchiveOrg.FILETYPE_AUDIO);
                     audioPlaylistLink.setAvailable(true);
+                    /* Put item in dedicated playlist package. */
                     audioPlaylistLink._setFilePackage(playlistpackage);
                     ArchiveOrg.setFinalFilename(audioPlaylistLink, item.getName());
+                    /* Collect results */
                     audioPlaylistFinalResults.add(audioPlaylistLink);
                 }
             }
             if (playlistCrawlMode == PlaylistCrawlMode.PLAYLIST_ONLY) {
                 /* Return playlist items only */
                 return audioPlaylistFinalResults;
-            } else if (isDownloadPage && playlistCrawlMode == PlaylistCrawlMode.AUTO) {
+            } else if (playlistCrawlMode == PlaylistCrawlMode.AUTO && isDownloadPage) {
                 logger.info("Skipping audio playlist because user added '/download/' page in auto mode -> Return items visible on the website -> Paylist is only display for '/details/' links");
             } else if (playlistCrawlMode == PlaylistCrawlMode.AUTO || playlistCrawlMode == PlaylistCrawlMode.PLAYLIST_AND_FILES) {
-                /* Return playlist and original files. */
+                /* Return playlist and selected files. */
                 selectedItems.addAll(audioPlaylistFinalResults);
                 return selectedItems;
             } else {
-                /* Do not return any playlist items but only original files. */
-                logger.info("Skipping audio playlist vecause user wants original files only");
+                /* Do not return any playlist items but only selected files. */
+                logger.info("Skipping audio playlist vecause user wants selected files only");
             }
         }
         if (desiredSubpathDecoded != null && desiredSubpathItems.isEmpty()) {
@@ -1372,728 +1409,14 @@ public class ArchiveOrgCrawler extends PluginForDecrypt {
         return crawlBook(br, bookAjaxURL, account);
     }
 
-    @Deprecated
-    private ArrayList<DownloadLink> crawlArchiveContent() throws Exception {
-        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        final String archiveName = new Regex(br.getURL(), ".*/([^/]+)$").getMatch(0);
-        final FilePackage fp = FilePackage.getInstance();
-        fp.setName(Encoding.htmlDecode(archiveName).trim());
-        final String[] htmls = br.getRegex("<tr><td>(.*?)</tr>").getColumn(0);
-        for (final String html : htmls) {
-            String url = new Regex(html, "(?i)(/download/[^\"\\']+)").getMatch(0);
-            final String filesizeBytesStr = new Regex(html, "id=\"size\"[^>]*>(\\d+)").getMatch(0);
-            if (StringUtils.isEmpty(url)) {
-                /* Skip invalid items */
-                continue;
-            }
-            url = br.getURL(url).toExternalForm();
-            final DownloadLink dl = this.createDownloadlink(url);
-            if (filesizeBytesStr != null) {
-                dl.setDownloadSize(Long.parseLong(filesizeBytesStr));
-            }
-            dl.setAvailable(true);
-            dl._setFilePackage(fp);
-            ret.add(dl);
-        }
-        return ret;
-    }
-
     /** Returns true if given URL leads to content inside an archive. */
     private static boolean isCompressedArchiveURL(final String url) throws MalformedURLException {
         return url.toLowerCase(Locale.ENGLISH).contains("view_archive.php");
     }
 
-    /** 2024-03-27: TODO: Remove this old/deprecated code by the end of 2024 */
-    @Deprecated
-    private ArrayList<DownloadLink> crawlOLD(final CryptedLink param) throws Exception {
-        final String contenturl = param.getCryptedUrl().replace("://www.", "://").replaceFirst("(?i)/(stream|embed)/", "/download/");
-        if (new Regex(contenturl, PATTERN_DOWNLOAD).patternFind()) {
-            return crawlPatternSlashDownloadWebsite(contenturl);
-        } else if (new Regex(contenturl, PATTERN_SEARCH).patternFind()) {
-            return this.crawlSearchQueryURL(param);
-        } else {
-            /*
-             * 2020-08-26: Login might sometimes be required for book downloads.
-             */
-            ensureInitHosterplugin();
-            final Account account = AccountController.getInstance().getValidAccount(hostPlugin.getHost());
-            if (account != null) {
-                /* Login whenever possible. */
-                hostPlugin.login(account, false);
-            }
-            URLConnectionAdapter con = null;
-            boolean isArchiveContentURL = isCompressedArchiveURL(contenturl);
-            if (isArchiveContentURL) {
-                br.getPage(contenturl);
-            } else {
-                try {
-                    /* Check if we have a direct URL --> Host plugin */
-                    con = br.openGetConnection(contenturl);
-                    /* Check again as URL could've changed. */
-                    isArchiveContentURL = isCompressedArchiveURL(con.getURL().toExternalForm());
-                    /*
-                     * 2020-03-04: E.g. directurls will redirect to subdomain e.g. ia800503.us.archive.org --> Sometimes the only way to
-                     * differ between a file or expected html.
-                     */
-                    final String host = Browser.getHost(con.getURL(), true);
-                    if (!isArchiveContentURL && (this.looksLikeDownloadableContent(con) || con.getLongContentLength() > br.getLoadLimit() || !host.equals("archive.org"))) {
-                        // final DownloadLink fina = this.createDownloadlink(parameter.replace("archive.org", host_decrypted));
-                        final DownloadLink link = new DownloadLink(hostPlugin, null, hostPlugin.getHost(), contenturl, true);
-                        if (this.looksLikeDownloadableContent(con)) {
-                            if (con.getCompleteContentLength() > 0) {
-                                if (con.isContentDecoded()) {
-                                    link.setDownloadSize(con.getCompleteContentLength());
-                                } else {
-                                    link.setVerifiedFileSize(con.getCompleteContentLength());
-                                }
-                            }
-                            link.setFinalFileName(getFileNameFromConnection(con));
-                            link.setAvailable(true);
-                        } else {
-                            /* 2021-02-05: Either offline or account-only. Assume offline for now. */
-                            link.setAvailable(false);
-                        }
-                        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-                        ret.add(link);
-                        return ret;
-                    } else {
-                        final int previousLoadLimit = br.getLoadLimit();
-                        try {
-                            br.setLoadLimit(Integer.MAX_VALUE);
-                            br.followConnection();
-                        } finally {
-                            br.setLoadLimit(previousLoadLimit);
-                        }
-                    }
-                } finally {
-                    if (con != null) {
-                        con.disconnect();
-                    }
-                }
-            }
-            if (br.getHttpConnection().getResponseCode() == 404) {
-                throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-            }
-            final boolean isBookPreviewAvailable = findBookReaderURLWebsite(br) != null;
-            if (isBookPreviewAvailable) {
-                /* Book is officially downloadable and loose book pages are also available -> Process as wished by the user-preferences. */
-                final boolean isOfficiallyDownloadable = br.containsHTML("class=\"download-button\"") && !br.containsHTML("class=\"download-lending-message\"");
-                final BookCrawlMode mode = PluginJsonConfig.get(ArchiveOrgConfig.class).getBookCrawlMode();
-                if (isOfficiallyDownloadable) {
-                    if (mode == BookCrawlMode.PREFER_ORIGINAL) {
-                        try {
-                            logger.info("Trying to crawl original files");
-                            return crawlDetailsWebsite(br.cloneBrowser(), param);
-                        } catch (final Exception e) {
-                            /* Rare case e.g.: https://archive.org/details/isbn_9789814585354 */
-                            logger.info("Details crawler failed -> Fallback to loose book pages");
-                            return crawlBookWebsite(br, param, account);
-                        }
-                    } else if (mode == BookCrawlMode.ORIGINAL_AND_LOOSE_PAGES) {
-                        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-                        try {
-                            ret.addAll(crawlDetailsWebsite(br, param));
-                        } catch (final Exception ignore) {
-                            logger.log(ignore);
-                            logger.info("Details crawler failed -> Fallback to returning loose book pages ONLY");
-                        }
-                        ret.addAll(crawlBookWebsite(br, param, account));
-                        return ret;
-                    } else {
-                        /* Only loose book pages can be crawled. */
-                        return crawlBookWebsite(br, param, account);
-                    }
-                } else {
-                    return crawlBookWebsite(br, param, account);
-                }
-            } else if (isArchiveContentURL) {
-                return crawlArchiveContent();
-            } else if (StringUtils.containsIgnoreCase(contenturl, "/details/")) {
-                return crawlDetailsWebsite(br, param);
-            } else {
-                return crawlFiles(contenturl);
-            }
-        }
-    }
-
-    @Deprecated
-    private static HashMap<String, AtomicInteger> LOCKS = new HashMap<String, AtomicInteger>();
-
-    @Deprecated
-    private Object requestLock(String name) {
-        synchronized (LOCKS) {
-            AtomicInteger lock = LOCKS.get(name);
-            if (lock == null) {
-                lock = new AtomicInteger(0);
-                LOCKS.put(name, lock);
-            }
-            lock.incrementAndGet();
-            return lock;
-        }
-    }
-
-    @Deprecated
-    private synchronized void unLock(String name) {
-        synchronized (LOCKS) {
-            final AtomicInteger lock = LOCKS.get(name);
-            if (lock != null) {
-                if (lock.decrementAndGet() == 0) {
-                    LOCKS.remove(name);
-                }
-            }
-        }
-    }
-
-    @Deprecated
-    private ArrayList<DownloadLink> crawlPatternSlashDownloadWebsite(final String url) throws Exception {
-        if (url == null) {
-            /* Developer mistake */
-            throw new IllegalArgumentException();
-        }
-        final String urlWithoutParams = URLHelper.getUrlWithoutParams(url);
-        final String path = new URL(urlWithoutParams).getPath().replaceFirst("(?i)^/download/", "/");
-        final String identifier = getIdentifierFromURL(url);
-        if (identifier == null) {
-            /* Invalid URL/identifier */
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        }
-        final boolean allowCheckForDirecturl = true;
-        if (path.contains("/") && allowCheckForDirecturl) {
-            /**
-             * 2023-05-30: Especially important when user adds a like to a file inside a .zip file as that will not be contained in the XML
-             * which we are crawling below. </br>
-             * Reference: https://board.jdownloader.org/showthread.php?t=89368
-             */
-            logger.info("Path contains subpath -> Checking for single directurl");
-            URLConnectionAdapter con = null;
-            try {
-                con = br.openHeadConnection(url);
-                ensureInitHosterplugin();
-                if (this.looksLikeDownloadableContent(con)) {
-                    logger.info("URL is directurl");
-                    final DownloadLink link = new DownloadLink(hostPlugin, null, hostPlugin.getHost(), url, true);
-                    if (con.getCompleteContentLength() > 0) {
-                        if (con.isContentDecoded()) {
-                            link.setDownloadSize(con.getCompleteContentLength());
-                        } else {
-                            link.setVerifiedFileSize(con.getCompleteContentLength());
-                        }
-                    }
-                    final String filenameFromHeader = getFileNameFromConnection(con);
-                    if (filenameFromHeader != null) {
-                        link.setFinalFileName(Encoding.htmlDecode(filenameFromHeader).trim());
-                    }
-                    link.setAvailable(true);
-                    final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-                    ret.add(link);
-                    return ret;
-                } else {
-                    logger.info("URL is not a directurl");
-                    switch (con.getResponseCode()) {
-                    case 404:
-                        throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-                    case 400:
-                        throw new DecrypterRetryException(RetryReason.HOST);
-                    default:
-                        break;
-                    }
-                }
-            } finally {
-                try {
-                    con.disconnect();
-                } catch (final Throwable e) {
-                }
-            }
-        }
-        return crawlXML(url, br, path);
-    }
-
-    /** Crawls all files from "/download/..." URLs. */
-    @Deprecated
-    private ArrayList<DownloadLink> crawlFiles(final String contenturl) throws Exception {
-        if (br.getHttpConnection().getResponseCode() == 404) {
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        } else if (br.containsHTML(">\\s*The item is not available")) {
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        } else if (!br.containsHTML("\"/download/")) {
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND, "Maybe invalid link or nothing there to download");
-        }
-        final String subfolderPathURLEncoded = new Regex(contenturl, "(?i)https?://[^/]+/(?:download|details)/(.*?)/?$").getMatch(0);
-        final String titleSlug = new Regex(contenturl, "(?i)https?://[^/]+/(?:download|details)/([^/]+)").getMatch(0);
-        if (titleSlug == null) {
-            throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
-        }
-        return crawlXML(br.getURL(), br, subfolderPathURLEncoded);
-    }
-
-    @Deprecated
-    private ArrayList<DownloadLink> crawlDetailsWebsite(final Browser br, final CryptedLink param) throws Exception {
-        final String identifier = getIdentifierFromURL(br.getURL());
-        if (identifier == null) {
-            /* Invalid URL */
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        }
-        final String downloadurl = br.getURL("/download/" + identifier).toExternalForm();
-        if (br.containsHTML("id=\"gamepadtext\"")) {
-            /* 2020-09-29: Rare case: Download browser emulated games */
-            return this.crawlXML(br.getURL(), br, identifier);
-        }
-        final ArrayList<DownloadLink> playlistItems = new ArrayList<DownloadLink>();
-        final String videoJson = br.getRegex("class=\"js-tv3-init\"[^>]*value='(\\{.*?\\})").getMatch(0);
-        if (videoJson != null) {
-            /* 2022-10-31: Example: https://archive.org/details/MSNBCW_20211108_030000_Four_Seasons_Total_Documentary */
-            final Map<String, Object> entries = restoreFromString(videoJson, TypeRef.MAP);
-            final String slug = entries.get("TV3.identifier").toString();
-            final List<String> urls = (List<String>) entries.get("TV3.clipstream_clips");
-            int position = 1;
-            final FilePackage fp = FilePackage.getInstance();
-            fp.setName(slug);
-            for (final String url : urls) {
-                final DownloadLink video = this.createDownloadlink(url);
-                video.setProperty(ArchiveOrg.PROPERTY_FILETYPE, ArchiveOrg.FILETYPE_VIDEO);
-                video.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_POSITION, position);
-                video.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_SIZE, urls.size());
-                ArchiveOrg.setFinalFilename(video, slug + ".mp4");
-                video.setAvailable(true);
-                video._setFilePackage(fp);
-                playlistItems.add(video);
-                position++;
-            }
-        }
-        final String audioPlaylistJson = br.getRegex("class=\"js-play8-playlist\"[^>]*value='(\\[.*?\\])'/>").getMatch(0);
-        final String metadataJson = br.getRegex("class=\"js-ia-metadata\"[^>]*value='(\\{.*?\\})'/>").getMatch(0);
-        if (audioPlaylistJson != null) {
-            final ArrayList<DownloadLink> audioPlaylistItemsSimple = new ArrayList<DownloadLink>();
-            final Map<String, DownloadLink> filepathToPlaylistItemMapping = new HashMap<String, DownloadLink>();
-            final List<Map<String, Object>> ressourcelist = (List<Map<String, Object>>) restoreFromString(audioPlaylistJson, TypeRef.OBJECT);
-            if (ressourcelist.isEmpty()) {
-                /* This should never happen. */
-                throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-            }
-            int position = 1;
-            final FilePackage fp = FilePackage.getInstance();
-            fp.setName(identifier);
-            for (final Map<String, Object> audiomap : ressourcelist) {
-                final List<Map<String, Object>> sources = (List<Map<String, Object>>) audiomap.get("sources");
-                if (sources.size() > 1) {
-                    /* Rare case -> Log it */
-                    logger.info("Found audio item with multiple sources: " + audiomap);
-                }
-                final Map<String, Object> source0 = sources.get(0);
-                final String title = (String) audiomap.get("title");
-                final DownloadLink audio = this.createDownloadlink(br.getURL(source0.get("file").toString()).toExternalForm());
-                audio.setProperty(ArchiveOrg.PROPERTY_FILETYPE, ArchiveOrg.FILETYPE_AUDIO);
-                audio.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_POSITION, position);
-                audio.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_SIZE, ressourcelist.size());
-                audio.setProperty(ArchiveOrg.PROPERTY_ARTIST, audiomap.get("artist")); // optional field
-                audio.setProperty(ArchiveOrg.PROPERTY_TITLE, title);
-                String filenameOrPath = (String) audiomap.get("orig");
-                if (StringUtils.isEmpty(filenameOrPath)) {
-                    filenameOrPath = title;
-                }
-                final String filename = getFilenameFromPath(filenameOrPath);
-                ArchiveOrg.setFinalFilename(audio, filename);
-                audio.setAvailable(true);
-                audio._setFilePackage(fp);
-                audioPlaylistItemsSimple.add(audio);
-                filepathToPlaylistItemMapping.put(filenameOrPath, audio);
-                position++;
-            }
-            final ArrayList<DownloadLink> audioPlaylistItemsDetailed = new ArrayList<DownloadLink>();
-            if (metadataJson != null) {
-                /**
-                 * Try to find more metadata to the results we already have and combine them with the track-position-data we know. </br>
-                 * In the end we should get the best of both worlds: All tracks with track numbers, metadata and file hashes for CRC
-                 * checking.
-                 */
-                logger.info("Looking for more detailed audio metadata");
-                audioPlaylistItemsDetailed.addAll(this.crawlMetadataJson(metadataJson, filepathToPlaylistItemMapping));
-            } else {
-                logger.warning("Failed to find metadataJson -> Can't search for detailed audio information");
-            }
-            if (audioPlaylistItemsDetailed.size() == ressourcelist.size()) {
-                logger.info("Found valid detailed audio information");
-                playlistItems.addAll(audioPlaylistItemsDetailed);
-            } else {
-                logger.info("Failed to obtain detailed audio information");
-                playlistItems.addAll(audioPlaylistItemsSimple);
-            }
-        }
-        final String downloadlinkToAllFilesDownload = br.getRegex("(?i)href=\"(/download/[^\"]*?)\">\\s*SHOW ALL").getMatch(0);
-        final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
-        final PlaylistCrawlMode playlistCrawlMode = cfg.getPlaylistCrawlMode202404();
-        if (playlistCrawlMode == PlaylistCrawlMode.PLAYLIST_ONLY && playlistItems.size() > 0) {
-            logger.info("Returning streaming items ONLY");
-            return playlistItems;
-        }
-        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        if (downloadlinkToAllFilesDownload == null || playlistCrawlMode == PlaylistCrawlMode.PLAYLIST_AND_FILES) {
-            ret.addAll(playlistItems);
-        }
-        if (downloadlinkToAllFilesDownload != null) {
-            /* This link will go back into this crawler to find all individual downloadlinks. */
-            ret.add(createDownloadlink(downloadurl));
-            return ret;
-        } else if (ArchiveOrg.isItemUnavailable(br) || ArchiveOrg.isAccountRequired(br)) {
-            if (br.containsHTML("/download/" + Pattern.quote(identifier))) {
-                /* Account is still required but we can go ahead and crawl all individual file URLs via XML. */
-                ret.add(createDownloadlink(downloadurl));
-                return ret;
-            } else {
-                throw new AccountRequiredException();
-            }
-        }
-        if (ret.isEmpty()) {
-            final boolean isUserProfile = identifier.startsWith("@");
-            if (isUserProfile) {
-                return this.crawlProfile(identifier, br.getURL());
-            } else {
-                logger.info("Crawling collection...");
-                final ArrayList<DownloadLink> collectionResults = crawlCollection(br.getURL(), identifier);
-                if (collectionResults.isEmpty()) {
-                    throw new DecrypterRetryException(RetryReason.EMPTY_FOLDER, "EMPTY_COLLECTION_" + identifier);
-                }
-                ret.addAll(collectionResults);
-            }
-        }
-        return ret;
-    }
-
-    @Deprecated
-    private ArrayList<DownloadLink> crawlXML(final String contenturl, final Browser xmlbr, final String path) throws IOException, PluginException, DecrypterRetryException {
-        if (xmlbr == null) {
-            /* Developer mistake */
-            throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
-        } else if (StringUtils.isEmpty(path)) {
-            /* Developer mistake */
-            throw new IllegalArgumentException();
-        }
-        /*
-         * 2020-03-04: Prefer crawling xml if possible as we then get all contents of that folder including contents of subfolders via only
-         * one request!
-         */
-        String titleSlug = null;
-        String desiredSubpathDecoded = null;
-        if (path.contains("/")) {
-            /* XML will always contain all files but in this case we only want to get all files in a specific subfolder. */
-            final String[] urlParts = path.split("/");
-            boolean buildSubpathNow = false;
-            for (final String urlPart : urlParts) {
-                if (!urlPart.isEmpty() && titleSlug == null) {
-                    /* First non-empty segment = Root = Slug of element-title */
-                    titleSlug = urlPart;
-                    buildSubpathNow = true;
-                } else if (buildSubpathNow) {
-                    if (desiredSubpathDecoded == null) {
-                        desiredSubpathDecoded = Encoding.htmlDecode(urlPart);
-                    } else {
-                        desiredSubpathDecoded += "/" + Encoding.htmlDecode(urlPart);
-                    }
-                }
-            }
-        } else {
-            titleSlug = path;
-        }
-        if (StringUtils.isEmpty(titleSlug)) {
-            /* Developer mistake */
-            throw new IllegalArgumentException();
-        }
-        String xmlResponse = null;
-        final String xmlurl = "https://" + getHost() + "/download/" + titleSlug + "/" + titleSlug + "_files.xml";
-        final String cacheKey = xmlurl;
-        final Object lock = requestLock(cacheKey);
-        try {
-            synchronized (lock) {
-                LinkCrawler crawler = getCrawler();
-                if (crawler != null) {
-                    crawler = crawler.getRoot();
-                }
-                if (crawler != null) {
-                    final Reference<String> reference = (Reference<String>) crawler.getCrawlerCache(cacheKey);
-                    xmlResponse = reference != null ? reference.get() : null;
-                }
-                if (StringUtils.isEmpty(xmlResponse)) {
-                    final int previousLoadLimit = xmlbr.getLoadLimit();
-                    try {
-                        xmlbr.setLoadLimit(Integer.MAX_VALUE);
-                        xmlbr.getPage(xmlurl);
-                        if (xmlbr.getHttpConnection().getResponseCode() == 404) {
-                            /* Should be a super rare case. */
-                            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-                        }
-                        xmlResponse = xmlbr.getRequest().getHtmlCode();
-                        if (crawler != null && StringUtils.isNotEmpty(xmlResponse)) {
-                            crawler.putCrawlerCache(cacheKey, new SoftReference<String>(xmlResponse));
-                        }
-                    } finally {
-                        xmlbr.setLoadLimit(previousLoadLimit);
-                    }
-                }
-            }
-        } finally {
-            unLock(cacheKey);
-        }
-        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        final ArchiveOrgConfig cfg = PluginJsonConfig.get(ArchiveOrgConfig.class);
-        final boolean crawlOriginalFilesOnly = cfg.isFileCrawlerCrawlOnlyOriginalVersions();
-        // final boolean crawlArchiveView = cfg.isFileCrawlerCrawlArchiveView();
-        final boolean crawlArchiveView = false;
-        final boolean crawlMetadataFiles = cfg.isFileCrawlerCrawlMetadataFiles();
-        final String[] items = new Regex(xmlResponse, "<file\\s*(.*?)\\s*</file>").getColumn(0);
-        if (items == null || items.length == 0) {
-            throw new DecrypterRetryException(RetryReason.EMPTY_FOLDER, path);
-        }
-        logger.info("Crawling all files below path: " + path);
-        final String basePath = "https://" + getHost() + "/download/" + titleSlug;
-        final List<String> skippedItems = new ArrayList<String>();
-        for (final String item : items) {
-            /* <old_version>true</old_version> */
-            final boolean isOldVersion = item.contains("old_version");
-            final boolean isOriginal = item.contains("source=\"original\"");
-            final boolean isMetadata = item.contains("<format>Metadata</format>");
-            final boolean isArchiveViewSupported = item.matches("(?i)(?s).*<format>\\s*(RAR|ZIP)\\s*</format>.*");
-            final boolean isAccountRequiredForDownload = item.contains("<private>true</private>");
-            String pathWithFilename = new Regex(item, "name=\"([^\"]+)").getMatch(0);
-            final String filesizeBytesStr = new Regex(item, "<size>(\\d+)</size>").getMatch(0);
-            final String sha1hash = new Regex(item, "<sha1>([a-f0-9]+)</sha1>").getMatch(0);
-            final String lastModifiedTimestamp = new Regex(item, "<mtime>(\\d+)</mtime>").getMatch(0);
-            // final String md5hash = new Regex(item, "<md5>([a-f0-9]+)</md5>").getMatch(0);
-            // final String crc32hash = new Regex(item, "<crc32>([a-f0-9]+)</crc32>").getMatch(0);
-            if (pathWithFilename == null) {
-                /* This should never happen */
-                continue;
-            } else if (isOldVersion) {
-                /* Always skip old version elements. */
-                skippedItems.add(pathWithFilename);
-                continue;
-            } else if (isMetadata && !crawlMetadataFiles) {
-                /* Only include metadata in downloads if wished by the user. */
-                skippedItems.add(pathWithFilename);
-                continue;
-            } else if (crawlOriginalFilesOnly && !isOriginal) {
-                /* Skip non-original content if user only wants original content. */
-                skippedItems.add(pathWithFilename);
-                continue;
-            }
-            if (Encoding.isHtmlEntityCoded(pathWithFilename)) {
-                /* Will sometimes contain "&amp;" */
-                pathWithFilename = Encoding.htmlOnlyDecode(pathWithFilename);
-            }
-            if (desiredSubpathDecoded != null && !pathWithFilename.startsWith(desiredSubpathDecoded)) {
-                /** Skip elements which do not match the sub-path we're trying to find items in or single file desired by user. */
-                skippedItems.add(pathWithFilename);
-                continue;
-            }
-            String relativePathEncoded;
-            String filename = null;
-            /* Search filename and properly encode relative URL to file. */
-            if (pathWithFilename.contains("/")) {
-                final String[] urlParts = pathWithFilename.split("/");
-                relativePathEncoded = "";
-                int index = 0;
-                for (final String urlPart : urlParts) {
-                    final boolean isLastSegment = index == urlParts.length - 1;
-                    relativePathEncoded += URLEncode.encodeURIComponent(urlPart);
-                    if (isLastSegment) {
-                        filename = urlPart;
-                    } else {
-                        relativePathEncoded += "/";
-                    }
-                    index++;
-                }
-            } else {
-                relativePathEncoded = URLEncode.encodeURIComponent(pathWithFilename);
-                filename = pathWithFilename;
-            }
-            final String url = basePath + "/" + relativePathEncoded;
-            final DownloadLink dlitem = createDownloadlink(url);
-            dlitem.setVerifiedFileSize(SizeFormatter.getSize(filesizeBytesStr));
-            dlitem.setAvailable(true);
-            dlitem.setProperty(ArchiveOrg.PROPERTY_FILENAME, filename);
-            ArchiveOrg.setFinalFilename(dlitem, filename);
-            String thisPath = new Regex(url, "(?i)download/(.+)/[^/]+$").getMatch(0);
-            if (Encoding.isUrlCoded(thisPath)) {
-                thisPath = Encoding.htmlDecode(thisPath);
-            }
-            dlitem.setRelativeDownloadFolderPath(thisPath);
-            if (isAccountRequiredForDownload) {
-                dlitem.setProperty(ArchiveOrg.PROPERTY_IS_ACCOUNT_REQUIRED, true);
-            }
-            final FilePackage fp = FilePackage.getInstance();
-            fp.setName(thisPath);
-            dlitem._setFilePackage(fp);
-            if (sha1hash != null) {
-                dlitem.setSha1Hash(sha1hash);
-            }
-            if (lastModifiedTimestamp != null) {
-                dlitem.setProperty(ArchiveOrg.PROPERTY_TIMESTAMP_FROM_API_LAST_MODIFIED, Long.parseLong(lastModifiedTimestamp));
-            }
-            ret.add(dlitem);
-            if (crawlArchiveView && isArchiveViewSupported) {
-                final DownloadLink archiveViewURL = createDownloadlink(url + "/");
-                ret.add(archiveViewURL);
-            }
-        }
-        if (desiredSubpathDecoded != null && ret.isEmpty()) {
-            /* Users' desired subfolder or file was not found -> Throw exception to provide feedback to user. */
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        }
-        if (skippedItems.size() > 0) {
-            logger.info("Skipped items: " + skippedItems.size());
-            logger.info(skippedItems.toString());
-        }
-        if (desiredSubpathDecoded != null && ret.size() == 1) {
-            /**
-             * Force auto package handling for single items e.g. if user only added a single file which is part of a huge folder. </br>
-             * Reference: https://board.jdownloader.org/showthread.php?t=92666&page=2
-             */
-            final Regex typeDownload = new Regex(contenturl, PATTERN_DOWNLOAD);
-            if (typeDownload.patternFind() && StringUtils.equalsIgnoreCase(ret.get(0).getPluginPatternMatcher(), contenturl)) {
-                CrawledLink source = getCurrentLink().getSourceLink();
-                boolean crawlerSource = false;
-                while (source != null) {
-                    if (canHandle(source.getURL())) {
-                        crawlerSource = true;
-                        break;
-                    } else {
-                        source = source.getSourceLink();
-                    }
-                }
-                if (!crawlerSource) {
-                    logger.info("remove filePackage from direct added download link:" + path);
-                    ret.get(0)._setFilePackage(null);
-                }
-            }
-        }
-        return ret;
-    }
-
-    /**
-     * Crawls json which can sometimes be found in html of such URLs: "/details/<identifier>" </br>
-     * If a filename/path to track position mapping is given, this handling tries to find the playlist position of crawled items based on
-     * the mapping.
-     */
-    @Deprecated
-    private ArrayList<DownloadLink> crawlMetadataJson(final String json, final Map<String, DownloadLink> filepathToPlaylistItemMapping) throws Exception {
-        final Map<String, Object> metamap_root = restoreFromString(json, TypeRef.MAP);
-        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        final List<Map<String, Object>> skippedItems = new ArrayList<Map<String, Object>>();
-        final List<Map<String, Object>> itemsWithDuplicatedTracknumbers = new ArrayList<Map<String, Object>>();
-        final Map<String, Object> metadata = (Map<String, Object>) metamap_root.get("metadata");
-        String title = (String) metadata.get("title");
-        if (title == null) {
-            /* Fallback */
-            title = metadata.get("identifier").toString();
-        }
-        /* There is different servers to choose from e.g. see also fields "d1", "d2" and "workable_servers". */
-        final String server = metamap_root.get("server").toString();
-        final String dir = metamap_root.get("dir").toString();
-        final List<Map<String, Object>> filemaps = (List<Map<String, Object>>) metamap_root.get("files");
-        if (filemaps == null || filemaps.isEmpty()) {
-            /* This should never happen. */
-            throw new DecrypterRetryException(RetryReason.EMPTY_FOLDER, title);
-        }
-        final String description = (String) metadata.get("description");
-        final FilePackage fp = FilePackage.getInstance();
-        fp.setName(title);
-        if (!StringUtils.isEmpty(description)) {
-            fp.setComment(description);
-        }
-        final Map<DownloadLink, List<Integer>> highestTrackPositions = new HashMap<DownloadLink, List<Integer>>();
-        int playlistSize = filepathToPlaylistItemMapping != null ? filepathToPlaylistItemMapping.size() : null;
-        for (final Map<String, Object> filemap : filemaps) {
-            final String source = filemap.get("source").toString(); // "original" or "derivative"
-            final Object originalO = filemap.get("original");
-            String filenameOrPath = (String) filemap.get("orig");
-            final Object sizeO = filemap.get("size");
-            if (StringUtils.isEmpty(filenameOrPath) && originalO instanceof String) {
-                filenameOrPath = originalO.toString();
-            }
-            if (StringUtils.isEmpty(filenameOrPath)) {
-                filenameOrPath = (String) filemap.get("name");
-            }
-            final DownloadLink playlistItem = filepathToPlaylistItemMapping != null ? filepathToPlaylistItemMapping.get(filenameOrPath) : null;
-            if (filepathToPlaylistItemMapping != null && (playlistItem == null || !source.equalsIgnoreCase("original"))) {
-                /* Skip non audio and non-original files if a filenameToTrackPositionMapping is available. */
-                skippedItems.add(filemap);
-                continue;
-            }
-            final String directurl = "https://" + server + dir + "/" + URLEncode.encodeURIComponent(filenameOrPath);
-            final DownloadLink file = new DownloadLink(hostPlugin, null, "archive.org", directurl, true);
-            file.setProperty(ArchiveOrg.PROPERTY_ARTIST, filemap.get("artist")); // Optional field
-            file.setProperty(ArchiveOrg.PROPERTY_TITLE, filemap.get("title")); // Optional field
-            if (sizeO != null) {
-                if (sizeO instanceof Number) {
-                    file.setVerifiedFileSize(((Number) sizeO).longValue());
-                } else {
-                    file.setVerifiedFileSize(Long.parseLong(sizeO.toString()));
-                }
-            }
-            final String crc32 = (String) filemap.get("crc32");
-            if (crc32 != null) {
-                file.setHashInfo(HashInfo.parse(crc32));
-            }
-            final String md5 = (String) filemap.get("md5");
-            if (md5 != null) {
-                file.setMD5Hash(md5);
-            }
-            final String sha1 = (String) filemap.get("sha1");
-            if (sha1 != null) {
-                file.setSha1Hash(sha1);
-            }
-            file.setProperty(ArchiveOrg.PROPERTY_TIMESTAMP_FROM_API_LAST_MODIFIED, filemap.get("mtime"));
-            if (playlistItem != null) {
-                /* Inherit filename from playlistItem */
-                file.setFinalFileName(playlistItem.getName());
-                file.setProperty(ArchiveOrg.PROPERTY_FILETYPE, ArchiveOrg.FILETYPE_AUDIO);
-            } else {
-                /* Set new filename */
-                final String filename = getFilenameFromPath(filenameOrPath);
-                ArchiveOrg.setFinalFilename(file, filename);
-            }
-            file._setFilePackage(fp);
-            file.setAvailable(true);
-            ret.add(file);
-        }
-        /* Add some additional properties */
-        for (final DownloadLink file : ret) {
-            /* Playlist size can only be determined after first loop -> Set that property here. */
-            final List<Integer> list = highestTrackPositions.get(file);
-            if (list != null) {
-                file.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_SIZE, Collections.max(list));
-            } else if (playlistSize != -1) {
-                file.setProperty(ArchiveOrg.PROPERTY_PLAYLIST_SIZE, playlistSize);
-            }
-        }
-        if (skippedItems.size() > 0) {
-            /*
-             * The list of skipped items is usually very big so we do not want to log the skipped items, only the number of skipped items.
-             */
-            logger.info("Skipped items: " + skippedItems.size());
-        }
-        if (itemsWithDuplicatedTracknumbers.size() > 0) {
-            logger.info("All detected items with duplicated tracknumbers: " + itemsWithDuplicatedTracknumbers.size() + " -> " + itemsWithDuplicatedTracknumbers);
-        }
-        return ret;
-    }
-
     @Override
     protected boolean looksLikeDownloadableContent(final URLConnectionAdapter urlConnection) {
         return hostPlugin.looksLikeDownloadableContent(urlConnection);
-    }
-
-    private static String getFilenameFromPath(final String filenameOrPath) {
-        final String filename;
-        if (filenameOrPath.contains("/")) {
-            /* We have a path -> Extract filename */
-            final String[] pathSegments = filenameOrPath.split("/");
-            final String filenameOnly = pathSegments[pathSegments.length - 1];
-            filename = filenameOnly;
-        } else {
-            /* We already have our filename and not a path. */
-            filename = filenameOrPath;
-        }
-        return filename;
     }
 
     @Override

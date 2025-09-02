@@ -22,15 +22,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-import org.appwork.storage.TypeRef;
-import org.appwork.utils.StringUtils;
-import org.appwork.utils.parser.UrlQuery;
-import org.jdownloader.downloader.hls.HLSDownloader;
-import org.jdownloader.plugins.components.config.BeegComConfig;
-import org.jdownloader.plugins.components.config.BeegComConfig.MODE;
-import org.jdownloader.plugins.config.PluginJsonConfig;
-import org.jdownloader.plugins.controller.LazyPlugin;
-
 import jd.PluginWrapper;
 import jd.http.Browser;
 import jd.http.URLConnectionAdapter;
@@ -43,7 +34,16 @@ import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 import jd.plugins.PluginForHost;
 
-@HostPlugin(revision = "$Revision: 51301 $", interfaceVersion = 2, names = { "beeg.com" }, urls = { "https?://(?:www\\.|beta\\.)?beeg\\.com/(-\\d+$|-?\\d+\\?t=\\d+-\\d+|-?\\d{8,}$)" })
+import org.appwork.storage.TypeRef;
+import org.appwork.utils.StringUtils;
+import org.appwork.utils.parser.UrlQuery;
+import org.jdownloader.downloader.hls.HLSDownloader;
+import org.jdownloader.plugins.components.config.BeegComConfig;
+import org.jdownloader.plugins.components.config.BeegComConfig.MODE;
+import org.jdownloader.plugins.config.PluginJsonConfig;
+import org.jdownloader.plugins.controller.LazyPlugin;
+
+@HostPlugin(revision = "$Revision: 51427 $", interfaceVersion = 2, names = { "beeg.com" }, urls = { "https?://(?:www\\.|beta\\.)?beeg\\.com/(-\\d+$|-?\\d+\\?t=\\d+-\\d+|-?\\d{8,}$)" })
 public class BeegCom extends PluginForHost {
     private String dllink[] = null;
 
@@ -90,7 +90,9 @@ public class BeegCom extends PluginForHost {
         if (link.getPluginPatternMatcher() == null) {
             return null;
         } else {
-            return new Regex(link.getPluginPatternMatcher(), "/-?(\\d+)").getMatch(0);
+            // remove leading 0 because
+            // error": "code=400, message=parameter \"id\" in path has an error: value 0123456789012345: an invalid integer:
+            return new Regex(link.getPluginPatternMatcher(), "/-?0*(\\d+)").getMatch(0);
         }
     }
 
@@ -177,24 +179,36 @@ public class BeegCom extends PluginForHost {
         if (qualities_hls == null || qualities_hls.size() == 0) {
             qualities_hls = (Map<String, String>) file.get("hls_resources");
         }
-        final Map<String, String> chosenQualities;
-        final Boolean isHLS;
+
+        Boolean isHLS = null;
+        String mp4URL[] = null;
         if (qualities_http != null) {
-            isHLS = false;
-            chosenQualities = qualities_http;
-        } else if (qualities_hls != null) {
-            isHLS = true;
-            chosenQualities = qualities_hls;
-        } else {
-            chosenQualities = null;
-            isHLS = null;
+            mp4URL = filter(qualities_http, link);
         }
-        if (chosenQualities != null) {
-            /* Pick best quality */
-            dllink = filter(chosenQualities, link);
-            if (dllink != null && !StringUtils.isEmpty(dllink[1]) && !dllink[1].startsWith("http")) {
-                dllink[1] = "https://video.beeg.com/" + dllink[1];
+        String hlsURL[] = null;
+        if (qualities_hls != null) {
+            hlsURL = filter(qualities_hls, link);
+        }
+        if (mp4URL != null && hlsURL != null) {
+            if (isHLS(link) || BeegComConfig.QUALITY.valueOf(hlsURL[0]).ordinal() < BeegComConfig.QUALITY.valueOf(mp4URL[0]).ordinal()) {
+                dllink = hlsURL;
+                isHLS = true;
+            } else {
+                dllink = mp4URL;
+                isHLS = false;
             }
+        } else if (hlsURL != null) {
+            dllink = hlsURL;
+            isHLS = true;
+        } else if (mp4URL != null) {
+            dllink = mp4URL;
+            isHLS = false;
+        }
+        if (isHLS(link) && !Boolean.TRUE.equals(isHLS)) {
+            throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
+        }
+        if (dllink != null && !StringUtils.isEmpty(dllink[1]) && !dllink[1].startsWith("http")) {
+            dllink[1] = "https://video.beeg.com/" + dllink[1];
         }
         if (!StringUtils.isEmpty(title)) {
             title = title.trim();

@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.appwork.utils.StringUtils;
 import org.appwork.utils.parser.UrlQuery;
@@ -47,7 +48,7 @@ import jd.plugins.PluginException;
 import jd.plugins.PluginForDecrypt;
 import jd.plugins.hoster.VscoCo;
 
-@DecrypterPlugin(revision = "$Revision: 50190 $", interfaceVersion = 3, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 51420 $", interfaceVersion = 3, names = {}, urls = {})
 public class VscoCoCrawler extends PluginForDecrypt {
     public VscoCoCrawler(PluginWrapper wrapper) {
         super(wrapper);
@@ -86,11 +87,13 @@ public class VscoCoCrawler extends PluginForDecrypt {
         return buildAnnotationUrls(getPluginDomains());
     }
 
+    private static final Pattern PATTERN_PROFILE_AND_SINGLE_MEDIA = Pattern.compile("/([\\w-]+)(/(media|video)/([a-f0-9-]{24,}))?", Pattern.CASE_INSENSITIVE);
+
     public static String[] buildAnnotationUrls(final List<String[]> pluginDomains) {
         final List<String> ret = new ArrayList<String>();
         for (final String[] domains : pluginDomains) {
             final String domainsPattern = buildHostsPatternPart(domains);
-            ret.add("https?://(?:[^/]+\\." + domainsPattern + "/grid/\\d+|(?:www\\.)?" + domainsPattern + "/[\\w-]+/grid/\\d+|(?:www\\.)?" + domainsPattern + "/[\\w-]+(/media/[a-f0-9]{24})?)");
+            ret.add("https?://(?:[^/]+\\." + domainsPattern + "/grid/\\d+|(?:www\\.)?" + domainsPattern + "/[\\w-]+/grid/\\d+|(?:www\\.)?" + domainsPattern + PATTERN_PROFILE_AND_SINGLE_MEDIA.pattern() + ")");
         }
         return ret.toArray(new String[0]);
     }
@@ -125,10 +128,11 @@ public class VscoCoCrawler extends PluginForDecrypt {
         /* Prepare json for our parser */
         json = json.replace(":undefined", ":null,");
         final Map<String, Object> root = JavaScriptEngineFactory.jsonToJavaMap(json);
-        final String singleImageID = new Regex(br.getURL(), "(?i)https?://[^/]+/[^/]+/media/([a-f0-9]{24})").getMatch(0);
-        if (singleImageID != null) {
-            /* Crawl single image */
-            final Map<String, Object> media = (Map<String, Object>) JavaScriptEngineFactory.walkJson(root, "medias/byId/" + singleImageID + "/media");
+        /* Check if we are looking for a single media item. */
+        final String singleMediaID = new Regex(br._getURL().getPath(), PATTERN_PROFILE_AND_SINGLE_MEDIA).getMatch(3);
+        if (singleMediaID != null) {
+            /* Crawl single media item */
+            final Map<String, Object> media = (Map<String, Object>) JavaScriptEngineFactory.walkJson(root, "medias/byId/" + singleMediaID + "/media");
             return crawlProcessMediaFirstPage(media, username);
         } else {
             /* Crawl profile */
@@ -170,103 +174,104 @@ public class VscoCoCrawler extends PluginForDecrypt {
             ajax.getHeaders().put("Authorization", "Bearer " + authToken);
             ajax.getHeaders().put("Accept", "application/json, text/javascript, */*; q=0.01");
             ajax.getHeaders().put("X-Requested-With", "XMLHttpRequest");
-            if (!StringUtils.isEmpty(nextCursor)) {
-                do {
-                    page++;
-                    final UrlQuery query = new UrlQuery();
-                    query.add("site_id", siteid);
-                    query.add("limit", Integer.toString(max_count_per_pagination_page));
-                    query.add("cursor", Encoding.urlEncode(nextCursor));
-                    ajax.getPage("/api/3.0/medias/profile?" + query.toString());
-                    final Map<String, Object> entries = (Map<String, Object>) JavaScriptEngineFactory.jsonToJavaObject(ajax.toString());
-                    nextCursor = (String) entries.get("next_cursor");
-                    final List<Map<String, Object>> mediaArray = (List<Map<String, Object>>) entries.get("media");
-                    for (final Map<String, Object> mediaArrayObj : mediaArray) {
-                        final ArrayList<DownloadLink> thisResults = new ArrayList<DownloadLink>();
-                        final String type = mediaArrayObj.get("type").toString(); // image/video
-                        final Map<String, Object> media = (Map<String, Object>) mediaArrayObj.get(type);
-                        final String description = (String) media.get("description");
-                        final String mediaID = media.get("_id").toString();
-                        final String hlsMaster = (String) media.get("playback_url");
-                        if (!StringUtils.isEmpty(hlsMaster)) {
-                            final ArrayList<DownloadLink> videoQualities = this.crawlHlsVideo(username, mediaID, hlsMaster);
-                            for (final DownloadLink quality : videoQualities) {
-                                /* Set some Packagizer properties */
-                                quality.setProperty(PROPERTY_DATE, sd.format(new Date(((Number) media.get("created_date")).longValue())));
-                                thisResults.add(quality);
-                                // quality.setProperty(PROPERTY_DATE_CAPTURED, sd.format(new Date(((Number)
-                                // media.get("captureDateMs")).longValue())));
-                            }
-                        } else {
-                            final Boolean isVideo = (Boolean) media.get("is_video");
-                            String url_content = null;
-                            if (Boolean.TRUE.equals(isVideo)) {
-                                url_content = media.get("video_url").toString();
-                            } else {
-                                url_content = media.get("responsive_url").toString();
-                            }
-                            if (!(url_content.startsWith("http") || url_content.startsWith("//"))) {
-                                url_content = Request.getLocation("//" + url_content, br.getRequest());
-                            }
-                            final String filename = username + "_" + media.get("_id") + getFileNameExtensionFromString(url_content, Boolean.TRUE.equals(isVideo) ? ".mp4" : ".jpg");
-                            String filenameFromURL = null;
-                            try {
-                                filenameFromURL = Plugin.getFileNameFromURL(new URL(url_content));
-                            } catch (MalformedURLException e) {
-                                logger.log(e);
-                            }
-                            final DownloadLink link = this.createDownloadlink(url_content);
-                            link.setContentUrl(media.get("permalink").toString());
-                            /* Set some Packagizer properties */
-                            link.setProperty(PROPERTY_DATE, sd.format(new Date(((Number) media.get("upload_date")).longValue())));
-                            link.setProperty(PROPERTY_DATE_CAPTURED, sd.format(new Date(((Number) media.get("capture_date_ms")).longValue())));
-                            if (filenameFromURL != null && VscoCo.isPreferOriginalFilenames()) {
-                                link.setName(filenameFromURL);
-                            } else {
-                                link.setFinalFileName(filename);
-                            }
-                            link.setAvailable(true);
-                            if (Boolean.FALSE.equals(isVideo)) {
-                                final Map<String, Object> image_meta = (Map<String, Object>) media.get("image_meta");
-                                if (image_meta != null) {
-                                    final Number file_size = (Number) image_meta.get("file_size");
-                                    if (file_size != null) {
-                                        link.setDownloadSize(file_size.longValue());
-                                    }
-                                    // dl.setMD5Hash(imageMeta.get("file_hash").toString());
-                                }
-                            }
-                            thisResults.add(link);
-                        }
-                        /* Set additional properties */
-                        for (final DownloadLink link : thisResults) {
-                            link.setProperty(PROPERTY_USERNAME, username);
-                            link.setProperty(VscoCo.PROPERTY_MEDIA_ID, mediaID);
-                            if (!StringUtils.isEmpty(description)) {
-                                link.setComment(description);
-                            }
-                            ret.add(link);
-                            fp.add(link);
-                            distribute(link);
-                        }
-                    }
-                    logger.info("Crawled page " + page + " | Items crawled so far: " + ret.size() + " | nextCursor: " + nextCursor);
-                    if (mediaArray.size() < max_count_per_pagination_page) {
-                        /* Fail safe */
-                        logger.info("Stopping because: Current page contains less items than " + max_count_per_pagination_page);
-                        break;
-                    } else if (StringUtils.isEmpty(nextCursor)) {
-                        logger.info("Stopping because: No nextCursor available");
-                        break;
-                    } else if (this.isAbort()) {
-                        logger.info("Stopping because: Crawl process aborted by user");
-                        break;
-                    } else {
-                    }
-                } while (true);
-            } else {
+            if (StringUtils.isEmpty(nextCursor)) {
                 logger.info("No pagination available for this profile");
+                return ret;
             }
+            pagination: do {
+                page++;
+                final UrlQuery query = new UrlQuery();
+                query.add("site_id", siteid);
+                query.add("limit", Integer.toString(max_count_per_pagination_page));
+                query.add("cursor", Encoding.urlEncode(nextCursor));
+                ajax.getPage("/api/3.0/medias/profile?" + query.toString());
+                final Map<String, Object> entries = (Map<String, Object>) JavaScriptEngineFactory.jsonToJavaObject(ajax.toString());
+                nextCursor = (String) entries.get("next_cursor");
+                final List<Map<String, Object>> mediaArray = (List<Map<String, Object>>) entries.get("media");
+                for (final Map<String, Object> mediaArrayObj : mediaArray) {
+                    final ArrayList<DownloadLink> thisResults = new ArrayList<DownloadLink>();
+                    final String type = mediaArrayObj.get("type").toString(); // image/video
+                    final Map<String, Object> media = (Map<String, Object>) mediaArrayObj.get(type);
+                    final String description = (String) media.get("description");
+                    final String mediaID = media.get("_id").toString();
+                    final String hlsMaster = (String) media.get("playback_url");
+                    if (!StringUtils.isEmpty(hlsMaster)) {
+                        final ArrayList<DownloadLink> videoQualities = this.crawlHlsVideo(username, mediaID, hlsMaster);
+                        for (final DownloadLink quality : videoQualities) {
+                            /* Set some Packagizer properties */
+                            quality.setProperty(PROPERTY_DATE, sd.format(new Date(((Number) media.get("created_date")).longValue())));
+                            thisResults.add(quality);
+                            // quality.setProperty(PROPERTY_DATE_CAPTURED, sd.format(new Date(((Number)
+                            // media.get("captureDateMs")).longValue())));
+                        }
+                    } else {
+                        final Boolean isVideo = (Boolean) media.get("is_video");
+                        String url_content = null;
+                        if (Boolean.TRUE.equals(isVideo)) {
+                            url_content = media.get("video_url").toString();
+                        } else {
+                            url_content = media.get("responsive_url").toString();
+                        }
+                        if (!(url_content.startsWith("http") || url_content.startsWith("//"))) {
+                            url_content = Request.getLocation("//" + url_content, br.getRequest());
+                        }
+                        final String filename = username + "_" + media.get("_id") + getFileNameExtensionFromString(url_content, Boolean.TRUE.equals(isVideo) ? ".mp4" : ".jpg");
+                        String filenameFromURL = null;
+                        try {
+                            filenameFromURL = Plugin.getFileNameFromURL(new URL(url_content));
+                        } catch (MalformedURLException e) {
+                            logger.log(e);
+                        }
+                        final DownloadLink link = this.createDownloadlink(url_content);
+                        link.setContentUrl(media.get("permalink").toString());
+                        /* Set some Packagizer properties */
+                        link.setProperty(PROPERTY_DATE, sd.format(new Date(((Number) media.get("upload_date")).longValue())));
+                        link.setProperty(PROPERTY_DATE_CAPTURED, sd.format(new Date(((Number) media.get("capture_date_ms")).longValue())));
+                        if (filenameFromURL != null && VscoCo.isPreferOriginalFilenames()) {
+                            link.setName(filenameFromURL);
+                        } else {
+                            link.setFinalFileName(filename);
+                        }
+                        link.setAvailable(true);
+                        if (Boolean.FALSE.equals(isVideo)) {
+                            final Map<String, Object> image_meta = (Map<String, Object>) media.get("image_meta");
+                            if (image_meta != null) {
+                                final Number file_size = (Number) image_meta.get("file_size");
+                                if (file_size != null) {
+                                    link.setDownloadSize(file_size.longValue());
+                                }
+                                // dl.setMD5Hash(imageMeta.get("file_hash").toString());
+                            }
+                        }
+                        thisResults.add(link);
+                    }
+                    /* Set additional properties */
+                    for (final DownloadLink link : thisResults) {
+                        link.setProperty(PROPERTY_USERNAME, username);
+                        link.setProperty(VscoCo.PROPERTY_MEDIA_ID, mediaID);
+                        if (!StringUtils.isEmpty(description)) {
+                            link.setComment(description);
+                        }
+                        ret.add(link);
+                        fp.add(link);
+                        distribute(link);
+                    }
+                }
+                logger.info("Crawled page " + page + " | Items crawled so far: " + ret.size() + " | nextCursor: " + nextCursor);
+                if (mediaArray.size() < max_count_per_pagination_page) {
+                    /* Fail safe */
+                    logger.info("Stopping because: Current page contains less items than " + max_count_per_pagination_page);
+                    break pagination;
+                } else if (StringUtils.isEmpty(nextCursor)) {
+                    logger.info("Stopping because: No nextCursor available");
+                    break pagination;
+                } else if (this.isAbort()) {
+                    logger.info("Stopping because: Crawl process aborted by user");
+                    break pagination;
+                } else {
+                    /* Continue to next page */
+                }
+            } while (true);
             return ret;
         }
     }
@@ -351,5 +356,11 @@ public class VscoCoCrawler extends PluginForDecrypt {
         video.setFinalFileName(username + "_" + mediaID + ".mp4");
         ret.add(video);
         return ret;
+    }
+
+    @Override
+    public int getMaxConcurrentProcessingInstances() {
+        /* 2025-08-27: Limited to 1 for testing to see if this helps avoid running into rate limiting or Cloudflare. */
+        return 1;
     }
 }

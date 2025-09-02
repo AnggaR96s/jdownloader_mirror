@@ -4,6 +4,7 @@ import java.awt.Component;
 import java.awt.Dialog.ModalityType;
 import java.awt.Point;
 import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.awt.event.HierarchyEvent;
 import java.awt.event.HierarchyListener;
 import java.awt.event.KeyEvent;
@@ -33,6 +34,8 @@ import javax.swing.JTextField;
 import javax.swing.ListCellRenderer;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
 
 import org.appwork.scheduler.DelayedRunnable;
 import org.appwork.storage.JSonStorage;
@@ -91,7 +94,6 @@ import jd.controlling.linkcrawler.modifier.DownloadFolderModifier;
 import jd.controlling.linkcrawler.modifier.PackageNameModifier;
 import jd.gui.swing.jdgui.JDGui;
 import jd.gui.swing.jdgui.views.settings.panels.packagizer.VariableAction;
-import jd.gui.swing.laf.LookAndFeelController;
 import jd.parser.html.HTMLParser;
 import jd.parser.html.HTMLParser.HtmlParserCharSequence;
 import jd.parser.html.HTMLParser.HtmlParserResultSet;
@@ -106,6 +108,12 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
     private ExtTextField                        password;
     private ExtCheckBox                         extractToggle;
     private EnableDisableUnchanged              autoStart = EnableDisableUnchanged.UNCHANGED;
+
+    @Override
+    protected void _init() {
+        super._init();
+        this.autoDisablePackagizerCheckbox();
+    }
 
     /**
      * @return the autoStart
@@ -137,15 +145,20 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         this.autoConfirm = autoConfirm;
     }
 
-    private EnableDisableUnchanged autoConfirm   = EnableDisableUnchanged.UNCHANGED;
+    private EnableDisableUnchanged autoConfirm                             = EnableDisableUnchanged.UNCHANGED;
     private JButton                confirmOptions;
-    private boolean                deepAnalyse   = false;
+    private boolean                deepAnalyse                             = false;
     private DelayedRunnable        delayedValidate;
     private ExtTextField           downloadPassword;
     private JComboBox              priority;
-    private final HashSet<String>  autoPasswords = new HashSet<String>();
+    private final HashSet<String>  autoPasswords                           = new HashSet<String>();
     private ExtTextField           comment;
     private JCheckBox              overwritePackagizer;
+    private boolean                hasUserClickedOverwritePackagizerButton = false;
+    /*
+     * Enable/disable "overwrite Packagizer rule" checkbox based on other fields' user inputs in AddLinksDialog.
+     */
+    private final boolean          packagizerAutoModeEnabled;
 
     public boolean isDeepAnalyse() {
         return deepAnalyse;
@@ -158,10 +171,12 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
     public AddLinksDialog() {
         super(UIOManager.BUTTONS_HIDE_OK, _GUI.T.AddLinksDialog_AddLinksDialog_(), null, _GUI.T.AddLinksDialog_AddLinksDialog_confirm(), null);
         config = JsonConfig.create(LinkgrabberSettings.class);
+        packagizerAutoModeEnabled = config.isAddLinksOverridePackagizerCheckboxAutoModeEnabled();
+        final String dialog_id = "AddLinksDialog";
         delayedValidate = new DelayedRunnable(500l, 10000l) {
             @Override
             public String getID() {
-                return "AddLinksDialog";
+                return dialog_id;
             }
 
             @Override
@@ -173,8 +188,8 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         };
         setPreferredWidth(700);
         setPreferredHeight(300);
-        setLocator(new RememberRelativeDialogLocator("AddLinksDialog", JDGui.getInstance().getMainFrame()));
-        setDimensor(new RememberLastDialogDimension("AddLinksDialog"));
+        setLocator(new RememberRelativeDialogLocator(dialog_id, JDGui.getInstance().getMainFrame()));
+        setDimensor(new RememberLastDialogDimension(dialog_id));
     }
 
     @Override
@@ -182,17 +197,18 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         return ModalityType.MODELESS;
     }
 
-    // @Override
-    // public Window getOwner() {
-    //
-    // return null;
-    // }
     @Override
     protected MigPanel createBottomPanel() {
         MigPanel ret = new MigPanel("ins 0", "[][][][]20[grow,fill][]", "[]");
         JLabel lbl = new JLabel(_GUI.T.AddLinksDialog_getDefaultButtonPanel_overwrite_packagizer());
         overwritePackagizer = new JCheckBox();
         overwritePackagizer.setSelected(CFG_LINKGRABBER.CFG.isAddLinksDialogOverwritesPackagizerRulesEnabled());
+        overwritePackagizer.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                hasUserClickedOverwritePackagizerButton = true;
+            }
+        });
         ret.add(new JLabel(new AbstractIcon(IconKey.ICON_UPLOAD, 22)), "gapleft 5");
         ret.add(overwritePackagizer, "gapleft 0");
         ret.add(lbl);
@@ -206,7 +222,8 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
     @Override
     protected void setReturnmask(boolean b) {
         super.setReturnmask(b);
-        if (b) {
+        if (b && hasUserClickedOverwritePackagizerButton) {
+            /* Update config so next time the dialog is opened, the value is remembered. */
             CFG_LINKGRABBER.CFG.setAddLinksDialogOverwritesPackagizerRulesEnabled(overwritePackagizer.isSelected());
         }
     }
@@ -258,22 +275,22 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         final List<CrawledLinkModifier> modifiers = new ArrayList<CrawledLinkModifier>();
         final List<CrawledLinkModifier> requiredPreModifiers = new ArrayList<CrawledLinkModifier>();
         final boolean overwritePackagizerRules = isOverwritePackagizerEnabled();
-        final String finalPackageName = packagename.getText().trim();
+        final String finalPackageName = getPackageName();
         if (StringUtils.isNotEmpty(finalPackageName)) {
             PackageHistoryManager.getInstance().add(finalPackageName);
             final PackageNameModifier mod = new PackageNameModifier(finalPackageName, overwritePackagizerRules);
             modifiers.add(mod);
             requiredPreModifiers.add(mod);
         }
-        final String finalComment = getComment().trim();
+        final String finalComment = getComment();
         if (StringUtils.isNotEmpty(finalComment)) {
             modifiers.add(new CommentModifier(finalComment));
         }
-        final String finalDestination = destination.getFile() != null ? destination.getFile().getAbsolutePath() : null;
+        final String finalDestination = getDestination();
         if (StringUtils.isNotEmpty(finalDestination)) {
             modifiers.add(new DownloadFolderModifier(finalDestination, overwritePackagizerRules));
         }
-        final String finalDownloadPassword = downloadPassword.getText();
+        final String finalDownloadPassword = getDownloadPassword();
         if (StringUtils.isNotEmpty(finalDownloadPassword)) {
             job.setCrawlerPassword(finalDownloadPassword);
             modifiers.add(new CrawledLinkModifier() {
@@ -290,7 +307,7 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                 }
             });
         }
-        final Priority finalPriority = (Priority) priority.getSelectedItem();
+        final Priority finalPriority = getPriority();
         if (finalPriority != null && !Priority.DEFAULT.equals(finalPriority)) {
             modifiers.add(new CrawledLinkModifier() {
                 @Override
@@ -365,13 +382,29 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         super.actionPerformed(e);
     }
 
+    public String getPackageName() {
+        return this.packagename.getText().trim();
+    }
+
     public String getComment() {
         return new EDTHelper<String>() {
             @Override
             public String edtRun() {
                 return comment.getText();
             }
-        }.getReturnValue();
+        }.getReturnValue().trim();
+    }
+
+    public String getDestination() {
+        return destination.getFile() != null ? destination.getFile().getAbsolutePath() : null;
+    }
+
+    public String getDownloadPassword() {
+        return downloadPassword.getText();
+    }
+
+    public Priority getPriority() {
+        return (Priority) priority.getSelectedItem();
     }
 
     @Override
@@ -383,6 +416,10 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
 
             protected void onChanged(ExtTextField txt2) {
                 delayedValidate.run();
+                final File file = this.getFile();
+                if (file == null) {
+                    return;
+                }
             }
 
             @Override
@@ -441,24 +478,41 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
             protected String getTextForValue(PackageHistoryEntry value) {
                 return value == null ? null : value.getName();
             }
+
+            @Override
+            public void onChanged() {
+                if (!StringUtils.isEmpty(this.getText())) {
+                    /* Non default value */
+                    autoEnablePackagizerCheckbox();
+                } else {
+                    /* Default value */
+                    autoDisablePackagizerCheckbox();
+                }
+            }
         };
         packagename.setBadColor(null);
         packagename.setList(PackageHistoryManager.getInstance().list());
         packagename.setUnkownTextInputAllowed(true);
         packagename.setHelpText(_GUI.T.AddLinksDialog_layoutDialogContent_packagename_help());
         packagename.setSelectedItem(null);
-        comment = new ExtTextField();
+        comment = new ExtTextField() {
+            @Override
+            public void onChanged() {
+                if (!StringUtils.isEmpty(this.getText())) {
+                    /* Non default value */
+                    autoEnablePackagizerCheckbox();
+                } else {
+                    /* Default value */
+                    autoDisablePackagizerCheckbox();
+                }
+            }
+        };
         comment.setDragEnabled(true);
         comment.setHelpText(_GUI.T.AddLinksDialog_layoutDialogContent_comment_help());
         comment.setBorder(BorderFactory.createCompoundBorder(comment.getBorder(), BorderFactory.createEmptyBorder(2, 6, 1, 6)));
         final String defaultFolder = org.appwork.storage.config.JsonConfig.create(GeneralSettings.class).getDefaultDownloadFolder();
         destination.setQuickSelectionList(DownloadPathHistoryManager.getInstance().listPaths(defaultFolder));
-        final String latest = config.getLatestDownloadDestinationFolder();
-        if (!config.isUseLastDownloadDestinationAsDefault() || StringUtils.isEmpty(latest)) {
-            destination.setFile(new File(defaultFolder));
-        } else {
-            destination.setFile(new File(latest));
-        }
+        destination.setFile(new File(getDownloadDestinationFieldDefaultValue()));
         input = new ExtTextArea() {
             {
                 final ExtTextArea textArea = this;
@@ -496,7 +550,18 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         input.setDragEnabled(true);
         sp = new JScrollPane(input);
         sp.setViewportBorder(BorderFactory.createEmptyBorder(2, 6, 1, 6));
-        password = new ExtTextField();
+        password = new ExtTextField() {
+            @Override
+            public void onChanged() {
+                if (!StringUtils.isEmpty(this.getText())) {
+                    /* Non default value */
+                    autoEnablePackagizerCheckbox();
+                } else {
+                    /* Default value */
+                    autoDisablePackagizerCheckbox();
+                }
+            }
+        };
         password.setDragEnabled(true);
         password.setHelpText(_GUI.T.AddLinksDialog_createExtracOptionsPanel_password());
         password.setBorder(BorderFactory.createCompoundBorder(password.getBorder(), BorderFactory.createEmptyBorder(2, 6, 1, 6)));
@@ -509,15 +574,42 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                 return r;
             }
         });
-        priority.setSelectedItem(Priority.DEFAULT);
+        priority.setSelectedItem(getPriorityFieldDefaultValue());
+        priority.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                JComboBox source = (JComboBox) e.getSource();
+                Priority priority = (Priority) source.getSelectedItem();
+                if (priority == getPriorityFieldDefaultValue()) {
+                    /* Default value */
+                    autoDisablePackagizerCheckbox();
+                } else {
+                    /* Non default value */
+                    autoEnablePackagizerCheckbox();
+                }
+            }
+        });
         downloadPassword = new ExtTextField();
         downloadPassword.setDragEnabled(true);
         downloadPassword.setHelpText(_GUI.T.AddLinksDialog_createExtracOptionsPanel_downloadpassword());
         downloadPassword.setBorder(BorderFactory.createCompoundBorder(downloadPassword.getBorder(), BorderFactory.createEmptyBorder(2, 6, 1, 6)));
         extractToggle = new ExtCheckBox();
-        extractToggle.setSelected(config.isAutoExtractionEnabled());
+        extractToggle.setSelected(getAutoExtractionFieldDefaultValue());
         // extractToggle.setBorderPainted(false);
         extractToggle.setToolTipText(_GUI.T.AddLinksDialog_layoutDialogContent_autoextract_tooltip());
+        extractToggle.addChangeListener(new ChangeListener() {
+            public void stateChanged(ChangeEvent e) {
+                JCheckBox source = (JCheckBox) e.getSource();
+                boolean isSelected = source.isSelected();
+                if (isSelected == getAutoExtractionFieldDefaultValue()) {
+                    /* Default value */
+                    autoDisablePackagizerCheckbox();
+                } else {
+                    /* Non default value */
+                    autoEnablePackagizerCheckbox();
+                }
+            }
+        });
         int height = Math.max(24, (int) (comment.getPreferredSize().height * 0.9));
         MigPanel p = new MigPanel("ins 0 0 3 0,wrap 3", "[][grow,fill][]", "[fill,grow][grow," + height + "!][grow," + height + "!][grow," + height + "!][grow," + height + "!]");
         p.add(new JLabel(new AbstractIcon(IconKey.ICON_LINKGRABBER, 32)), "aligny top,height 32!,width 32!");
@@ -564,7 +656,7 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                             }
                         }
                         ClipboardContent clipboardContent = null;
-                        if (StringUtils.isEmpty(textAuto) && config.isAutoFillAddLinksDialogWithClipboardContentEnabled()) {
+                        if (config.isAutoFillAddLinksDialogWithClipboardContentEnabled() && StringUtils.isEmpty(textAuto)) {
                             final ClipboardMonitoring clp = ClipboardMonitoring.getINSTANCE();
                             clipboardContent = clp.getCurrentContent();
                             if (clipboardContent != null) {
@@ -604,6 +696,24 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
             }
         });
         return p;
+    }
+
+    private String getDownloadDestinationFieldDefaultValue() {
+        final String defaultFolder = org.appwork.storage.config.JsonConfig.create(GeneralSettings.class).getDefaultDownloadFolder();
+        final String latest = config.getLatestDownloadDestinationFolder();
+        if (config.isUseLastDownloadDestinationAsDefault() && !StringUtils.isEmpty(latest)) {
+            return latest;
+        } else {
+            return defaultFolder;
+        }
+    }
+
+    private boolean getAutoExtractionFieldDefaultValue() {
+        return config.isAutoExtractionEnabled();
+    }
+
+    private Priority getPriorityFieldDefaultValue() {
+        return Priority.DEFAULT;
     }
 
     private Component createIconLabel(Icon add, String tooltip) {
@@ -689,10 +799,8 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                     destination.setToolTipText(null);
                     destination.getTxt().setForeground(null);
                 }
-                if (okButton.isEnabled()) {
-                    if (cancelButton.hasFocus()) {
-                        okButton.requestFocus();
-                    }
+                if (okButton.isEnabled() && cancelButton.hasFocus()) {
+                    okButton.requestFocus();
                 }
             }
         };
@@ -737,10 +845,8 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                 new EDTRunner() {
                     @Override
                     protected void runInEDT() {
-                        if (input.isShowing()) {
-                            if (CFG_GUI.HELP_DIALOGS_ENABLED.isEnabled()) {
-                                HelpDialog.show(Boolean.FALSE, Boolean.TRUE, new Point(input.getLocationOnScreen().x + input.getWidth() / 2, input.getLocationOnScreen().y + 10), null, Dialog.STYLE_SHOW_DO_NOT_DISPLAY_AGAIN, _GUI.T.AddLinksDialog_AddLinksDialog_(), _GUI.T.AddLinksDialog_layoutDialogContent_description(), new AbstractIcon(IconKey.ICON_LINKGRABBER, 32));
-                            }
+                        if (input.isShowing() && CFG_GUI.HELP_DIALOGS_ENABLED.isEnabled()) {
+                            HelpDialog.show(Boolean.FALSE, Boolean.TRUE, new Point(input.getLocationOnScreen().x + input.getWidth() / 2, input.getLocationOnScreen().y + 10), null, Dialog.STYLE_SHOW_DO_NOT_DISPLAY_AGAIN, _GUI.T.AddLinksDialog_AddLinksDialog_(), _GUI.T.AddLinksDialog_layoutDialogContent_description(), new AbstractIcon(IconKey.ICON_LINKGRABBER, 32));
                         }
                     }
                 };
@@ -756,19 +862,6 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
         return true;
     }
 
-    public static void main(String[] args) {
-        LookAndFeelController.getInstance().setUIManager();
-        AddLinksDialog d = new AddLinksDialog();
-        try {
-            Dialog.getInstance().showDialog(d);
-        } catch (DialogClosedException e) {
-            e.printStackTrace();
-        } catch (DialogCanceledException e) {
-            e.printStackTrace();
-        }
-        System.exit(1);
-    }
-
     private final AtomicReference<Thread> asyncImportThread = new AtomicReference<Thread>();
 
     protected void asyncAnalyse(final String textAuto, final ClipboardContent clipboardContent) {
@@ -782,84 +875,8 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
             public void run() {
                 try {
                     thisThread = Thread.currentThread();
-                    final String resultText;
-                    if (textAuto != null) {
-                        if (config.isAddLinksPreParserAutoExtractionPasswordSearchEnabled()) {
-                            /* Look for passwords in pasted text if wished by the user. */
-                            /* First look for passwords only in text. If no passwords are found, check auto text for passwords. */
-                            HashSet<String> passwords = PasswordUtils.getPasswords(clipboardContent != null ? clipboardContent.getContentText() : null);
-                            if (passwords != null && passwords.isEmpty()) {
-                                /* Look for passwords in auto generated text / html. */
-                                passwords = PasswordUtils.getPasswords(textAuto);
-                            }
-                            if (passwords != null && passwords.size() > 0) {
-                                synchronized (autoPasswords) {
-                                    autoPasswords.addAll(passwords);
-                                }
-                            }
-                            new EDTRunner() {
-                                @Override
-                                protected void runInEDT() {
-                                    synchronized (autoPasswords) {
-                                        if (autoPasswords.size() > 1) {
-                                            password.setText(JSonStorage.serializeToJson(autoPasswords));
-                                        } else if (autoPasswords.size() > 0) {
-                                            password.setText(autoPasswords.toArray(new String[] {})[0]);
-                                        }
-                                    }
-                                }
-                            };
-                        }
-                        if (config.isAddLinksPreParserEnabled()) {
-                            final String parseTextAuto = preprocessFind(textAuto);
-                            final String base = clipboardContent != null ? clipboardContent.getBrowserURL() : null;
-                            String[] result = HTMLParser.getHttpLinks(parseTextAuto, base, new HtmlParserResultSet() {
-                                @Override
-                                public boolean add(HtmlParserCharSequence e) {
-                                    if (thisThread != asyncImportThread.get()) {
-                                        throw new RuntimeException("abort");
-                                    }
-                                    return super.add(e);
-                                }
-                            });
-                            if (result.length == 0) {
-                                result = HTMLParser.getHttpLinks(parseTextAuto.replace("www.", "http://www."), base, new HtmlParserResultSet() {
-                                    @Override
-                                    public boolean add(HtmlParserCharSequence e) {
-                                        if (thisThread != asyncImportThread.get()) {
-                                            throw new RuntimeException("abort");
-                                        }
-                                        return super.add(e);
-                                    }
-                                });
-                                if (result.length == 0) {
-                                    result = HTMLParser.getHttpLinks("http://" + parseTextAuto, base, new HtmlParserResultSet() {
-                                        @Override
-                                        public boolean add(HtmlParserCharSequence e) {
-                                            if (thisThread != asyncImportThread.get()) {
-                                                throw new RuntimeException("abort");
-                                            }
-                                            return super.add(e);
-                                        }
-                                    });
-                                }
-                            }
-                            resultText = StringUtils.join(result, "\r\n");
-                        } else {
-                            resultText = textAuto;
-                        }
-                    } else {
-                        resultText = "";
-                    }
-                    new EDTRunner() {
-                        @Override
-                        protected void runInEDT() {
-                            if (thisThread == asyncImportThread.get()) {
-                                input.setText(resultText);
-                                input.setEditable(true);
-                            }
-                        }
-                    }.waitForEDT();
+                    final String resultText = processTextAuto(textAuto, clipboardContent);
+                    updateUIWithResult(resultText);
                 } catch (final Throwable e) {
                     if (thisThread == asyncImportThread.get()) {
                         LogController.CL().log(e);
@@ -867,10 +884,145 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
                 } finally {
                     asyncImportThread.compareAndSet(Thread.currentThread(), null);
                 }
-            };
+            }
+
+            /** Process text: find links and possible extraction passwords. */
+            private String processTextAuto(String textAuto, final ClipboardContent clipboardContent) {
+                if (textAuto == null) {
+                    /* Nothing to process */
+                    return "";
+                }
+                /* replace lonely carrier return with CRLF */
+                textAuto = textAuto.replaceAll("\r(!\n)", "\r\n");
+                if (config.isAddLinksPreParserAutoExtractionPasswordSearchEnabled()) {
+                    processPasswordExtraction(textAuto, clipboardContent);
+                }
+                if (!config.isAddLinksPreParserEnabled()) {
+                    /* Links pre parser is disabled in config. */
+                    return textAuto;
+                }
+                return extractLinksFromText(textAuto, clipboardContent);
+            }
+
+            private void processPasswordExtraction(final String textAuto, final ClipboardContent clipboardContent) {
+                HashSet<String> passwords = PasswordUtils.getPasswords(clipboardContent != null ? clipboardContent.getContentText() : null);
+                if (passwords != null && !passwords.isEmpty()) {
+                    // Passwords found in clipboard content
+                } else {
+                    // Look for passwords in auto generated text / html
+                    passwords = PasswordUtils.getPasswords(textAuto);
+                }
+                if (passwords == null || passwords.size() == 0) {
+                    return;
+                }
+                synchronized (autoPasswords) {
+                    autoPasswords.addAll(passwords);
+                }
+                updatePasswordUI();
+            }
+
+            private void updatePasswordUI() {
+                new EDTRunner() {
+                    protected void runInEDT() {
+                        synchronized (autoPasswords) {
+                            if (autoPasswords.size() > 1) {
+                                password.setText(JSonStorage.serializeToJson(autoPasswords));
+                            } else if (autoPasswords.size() > 0) {
+                                password.setText(autoPasswords.toArray(new String[] {})[0]);
+                            }
+                        }
+                    }
+                };
+            }
+
+            private String extractLinksFromText(final String textAuto, final ClipboardContent clipboardContent) {
+                final String parseTextAuto = preprocessFind(textAuto);
+                final String base = clipboardContent != null ? clipboardContent.getBrowserURL() : null;
+                // Try original text
+                String[] result = tryExtractLinks(parseTextAuto, base);
+                if (result.length > 0) {
+                    return StringUtils.join(result, "\r\n");
+                }
+                // Try with www. replaced
+                result = tryExtractLinks(parseTextAuto.replace("www.", "http://www."), base);
+                if (result.length > 0) {
+                    return StringUtils.join(result, "\r\n");
+                }
+                // Try with http:// prefix
+                result = tryExtractLinks("http://" + parseTextAuto, base);
+                return StringUtils.join(result, "\r\n");
+            }
+
+            private String[] tryExtractLinks(final String text, final String base) {
+                return HTMLParser.getHttpLinks(text, base, new HtmlParserResultSet() {
+                    public boolean add(HtmlParserCharSequence e) {
+                        if (thisThread != asyncImportThread.get()) {
+                            throw new RuntimeException("abort");
+                        }
+                        return super.add(e);
+                    }
+                });
+            }
+
+            private void updateUIWithResult(final String resultText) {
+                new EDTRunner() {
+                    protected void runInEDT() {
+                        if (thisThread == asyncImportThread.get()) {
+                            input.setText(resultText);
+                            input.setEditable(true);
+                        }
+                    }
+                }.waitForEDT();
+            }
         };
         asyncImportThread.set(thread);
         thread.start();
+    }
+
+    /** Auto disables override packagizer rules checkbox if any relevant fields has a non default value && auto mode is enabled. */
+    private void autoEnablePackagizerCheckbox() {
+        if (this.overwritePackagizer == null) {
+            return;
+        } else if (!packagizerAutoModeEnabled) {
+            return;
+        } else if (hasUserClickedOverwritePackagizerButton) {
+            /* User has already altered this checkbox -> Do not touch */
+            return;
+        }
+        this.overwritePackagizer.setSelected(true);
+        /* ChangeListener on overwritePackagizer will set this to true so we'll correct that here. */
+        hasUserClickedOverwritePackagizerButton = false;
+    }
+
+    /** Auto disables override packagizer rules checkbox if all relevant fields have their default settings && auto mode is enabled. */
+    private void autoDisablePackagizerCheckbox() {
+        if (this.overwritePackagizer == null) {
+            return;
+        } else if (!packagizerAutoModeEnabled) {
+            return;
+        } else if (hasUserClickedOverwritePackagizerButton) {
+            /* User has already altered this checkbox -> Do not touch */
+            return;
+        }
+        /* Check for non-default values for all relevant fields. If any field is non default, do not touch Packagizer checkbox. */
+        final String finalPackageName = getPackageName();
+        if (!StringUtils.isEmpty(finalPackageName)) {
+            return;
+        }
+        final String finalComment = getComment();
+        if (!StringUtils.isEmpty(finalComment)) {
+            return;
+        }
+        final String finalDownloadPassword = getDownloadPassword();
+        if (!StringUtils.isEmpty(finalDownloadPassword)) {
+            return;
+        }
+        final Priority priority = this.getPriority();
+        if (priority != this.getPriorityFieldDefaultValue()) {
+            return;
+        }
+        /* ChangeListener on overwritePackagizer will set this to true so we'll correct that here. */
+        this.overwritePackagizer.setSelected(false);
     }
 
     private Component createIconLabel(String iconKey, String tooltip) {
@@ -880,9 +1032,9 @@ public class AddLinksDialog extends AbstractDialog<LinkCollectingJob> {
     }
 
     protected String preprocessFind(String text) {
-        if (text != null) {
-            return new LinkCrawler(false, false).preprocessFind(text, null, false);
+        if (text == null) {
+            return null;
         }
-        return text;
+        return new LinkCrawler(false, false).preprocessFind(text, null, false);
     }
 }

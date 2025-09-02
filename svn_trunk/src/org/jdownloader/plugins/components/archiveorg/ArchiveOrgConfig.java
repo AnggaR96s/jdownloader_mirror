@@ -1,17 +1,21 @@
 package org.jdownloader.plugins.components.archiveorg;
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Set;
 
 import org.appwork.storage.StorableValidatorIgnoresMissingSetter;
+import org.appwork.storage.Storage;
 import org.appwork.storage.config.annotations.AboutConfig;
-import org.appwork.storage.config.annotations.DefaultBooleanValue;
-import org.appwork.storage.config.annotations.DefaultEnumArrayValue;
 import org.appwork.storage.config.annotations.DefaultEnumValue;
+import org.appwork.storage.config.annotations.DefaultFactory;
 import org.appwork.storage.config.annotations.DefaultIntValue;
 import org.appwork.storage.config.annotations.DefaultOnNull;
 import org.appwork.storage.config.annotations.DescriptionForConfigEntry;
 import org.appwork.storage.config.annotations.LabelInterface;
 import org.appwork.storage.config.annotations.SpinnerValidator;
+import org.appwork.storage.config.defaults.AbstractDefaultFactory;
+import org.appwork.storage.config.handler.KeyHandler;
 import org.jdownloader.plugins.config.Order;
 import org.jdownloader.plugins.config.PluginConfigInterface;
 import org.jdownloader.plugins.config.PluginHost;
@@ -26,19 +30,11 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
             return "File crawler: Select types to crawl";
         }
 
-        public String getFileCrawlerCrawlOnlyOriginalVersions_label() {
-            return "File crawler: Add only original versions of files?";
+        public String getDeselectedTypesLinksMode_label() {
+            return "File crawler: How to treat links of deselected types?";
         }
 
-        public String getFileCrawlerCrawlMetadataFiles_label() {
-            return "File crawler: Include metadata files (typically .xml & .sqlite files)?";
-        }
-
-        public String getFileCrawlerCrawlThumbnails_label() {
-            return "File crawler: Crawl thumbnails?";
-        }
-
-        public String getSingleFilePathNonFoundMode_label() {
+        public String getSingleFilePathNotFoundMode_label() {
             return "File crawler: What to do when single file/folder-path is not found?";
         }
 
@@ -55,15 +51,15 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         }
 
         public String getBookCrawlMode_label() {
-            return "Book crawl mode";
+            return "Book crawl mode: Which items to return if the added link is a book?";
         }
 
-        public String getMarkNonViewableBookPagesAsOfflineIfNoAccountIsAvailable_label() {
-            return "Mark non viewable book pages as offline if no account is available?";
+        public String getNonDownloadableBookPagesMode_label() {
+            return "How to display non downloadable book pages in linkgrabber?";
         }
 
         public String getPlaylistCrawlMode202404_label() {
-            return "Audio/video playlist crawl mode";
+            return "Playlist crawl mode: Which files to add if the added link is a audio/video playlist?";
         }
 
         public String getSearchTermCrawlerMaxResultsLimit_label() {
@@ -71,43 +67,118 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         }
     }
 
+    class DefaultFileCrawlerTypesToCrawl extends AbstractDefaultFactory<Set<ArchiveOrgType>> {
+        @Override
+        public Set<ArchiveOrgType> getDefaultValue(KeyHandler<Set<ArchiveOrgType>> keyHandler) {
+            final Storage storage;
+            if (keyHandler != null && (storage = keyHandler.getStorageHandler().getPrimitiveStorage(keyHandler)) != null) {
+                /* This migrated a bunch of old boolean settings to one new ENUM setting. */
+                if (storage.hasProperty("filecrawlercrawlonlyoriginalversions") || storage.hasProperty("filecrawlercrawlthumbnails") || storage.hasProperty("filecrawlercrawlmetadatafiles")) {
+                    final Set<ArchiveOrgType> ret = new HashSet<ArchiveOrgType>();
+                    if (Boolean.TRUE.equals(storage.remove("filecrawlercrawlonlyoriginalversions"))) {
+                        ret.add(ArchiveOrgType.ORIGINAL);
+                    } else {
+                        ret.add(ArchiveOrgType.ORIGINAL);
+                        ret.add(ArchiveOrgType.DERIVATIVE);
+                        if (Boolean.TRUE.equals(storage.remove("filecrawlercrawlthumbnails"))) {
+                            ret.add(ArchiveOrgType.THUMBNAIL);
+                            ret.add(ArchiveOrgType.DERIVATIVE_COVER);
+                        }
+                        if (Boolean.TRUE.equals(storage.remove("filecrawlercrawlmetadatafiles"))) {
+                            ret.add(ArchiveOrgType.METADATA);
+                            ret.add(ArchiveOrgType.METADATA_TORRENT);
+                        }
+                    }
+                    if (ret.size() > 0) {
+                        return ret;
+                    }
+                }
+            }
+            return new HashSet<ArchiveOrgType>(Arrays.asList(ArchiveOrgType.values()));// ALL
+        }
+    }
+
     @AboutConfig
     @DefaultOnNull
-    @DefaultEnumArrayValue(value = { "ORIGINAL", "DERIVATIVE", "METADATA", "THUMBNAIL" })
+    @DefaultFactory(DefaultFileCrawlerTypesToCrawl.class)
     @Order(10)
     Set<ArchiveOrgType> getFileCrawlerTypesToCrawl();
 
     void setFileCrawlerTypesToCrawl(Set<ArchiveOrgType> list);
 
     @StorableValidatorIgnoresMissingSetter
-    public enum ArchiveOrgType {
-        ORIGINAL,
-        DERIVATIVE,
-        METADATA,
-        THUMBNAIL
+    public static enum ArchiveOrgType implements LabelInterface {
+        ORIGINAL {
+            @Override
+            public String getLabel() {
+                return "Original files";
+            }
+        },
+        DERIVATIVE {
+            @Override
+            public String getLabel() {
+                return "Derivatives | Transcoded audio/video files";
+            }
+        },
+        METADATA {
+            @Override
+            public String getLabel() {
+                return "Metadata | .xml/.xqlite files";
+            }
+        },
+        METADATA_TORRENT {
+            @Override
+            public String getLabel() {
+                return "Metadata | .torrent files";
+            }
+        },
+        THUMBNAIL {
+            @Override
+            public String getLabel() {
+                return "Thumbnails";
+            }
+        },
+        DERIVATIVE_COVER {
+            @Override
+            public String getLabel() {
+                return "Decorative covers";
+            }
+        },
+        DERIVATIVE_SPECTROGRAM {
+            @Override
+            public String getLabel() {
+                return "Spectogram";
+            }
+        },
+        DERIVATIVE_PEAKS {
+            @Override
+            public String getLabel() {
+                return "Columbia Peaks | .afpk audio fingerprint files";
+            }
+        };
+    }
+
+    public static enum DeselectedTypesMode implements LabelInterface {
+        ADD_DISABLED {
+            @Override
+            public String getLabel() {
+                return "Add links disabled";
+            }
+        },
+        DO_NOT_ADD_SKIP {
+            @Override
+            public String getLabel() {
+                return "Do not add links (skip)";
+            }
+        };
     }
 
     @AboutConfig
-    @DefaultBooleanValue(false)
-    @Order(10)
-    boolean isFileCrawlerCrawlOnlyOriginalVersions();
+    @DefaultEnumValue("ADD_DISABLED")
+    @Order(11)
+    DeselectedTypesMode getDeselectedTypesLinksMode();
 
-    void setFileCrawlerCrawlOnlyOriginalVersions(boolean b);
-
-    @AboutConfig
-    @DefaultBooleanValue(false)
-    @Order(25)
-    boolean isFileCrawlerCrawlMetadataFiles();
-
-    void setFileCrawlerCrawlMetadataFiles(boolean b);
-
-    @AboutConfig
-    @DefaultBooleanValue(true)
-    @DescriptionForConfigEntry("Crawl thumbnails?")
-    @Order(26)
-    boolean isFileCrawlerCrawlThumbnails();
-
-    void setFileCrawlerCrawlThumbnails(boolean b);
+    void setDeselectedTypesLinksMode(final DeselectedTypesMode mode);
 
     final SingleFilePathNotFoundMode default_SingleFilePathNotFoundMode = SingleFilePathNotFoundMode.ADD_ALL;
 
@@ -115,7 +186,7 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         ADD_ALL {
             @Override
             public String getLabel() {
-                return "Add all (other) items";
+                return "Add all other items";
             }
         },
         ADD_NOTHING_AND_DISPLAY_ADDED_URL_AS_OFFLINE {
@@ -135,9 +206,9 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
     @AboutConfig
     @DefaultEnumValue("DEFAULT")
     @Order(27)
-    SingleFilePathNotFoundMode getSingleFilePathNonFoundMode();
+    SingleFilePathNotFoundMode getSingleFilePathNotFoundMode();
 
-    void setSingleFilePathNonFoundMode(final SingleFilePathNotFoundMode mode);
+    void setSingleFilePathNotFoundMode(final SingleFilePathNotFoundMode mode);
 
     final SingleFileAdoptFolderStructureMode default_SingleFileAdoptFolderStructureMode = SingleFileAdoptFolderStructureMode.ENABLE;
 
@@ -173,7 +244,7 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         PLAYLIST_TITLE_WITH_TRACK_NUMBER {
             @Override
             public String getLabel() {
-                return "Like in playlist: <TrackNumber>.<title> - <artist>.<fileExt>";
+                return "Same as website: <TrackNumber>.<title> - <artist>.<fileExt>";
             }
         },
         ORIGINAL_FILENAME {
@@ -203,13 +274,13 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         PREFER_ORIGINAL {
             @Override
             public String getLabel() {
-                return "Original files if possible else loose book pages";
+                return "Selected files if possible else loose book pages";
             }
         },
         ORIGINAL_AND_LOOSE_PAGES {
             @Override
             public String getLabel() {
-                return "Original files if possible and loose book pages";
+                return "Selected files if possible and loose book pages";
             }
         },
         LOOSE_PAGES {
@@ -227,12 +298,43 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
 
     void setBookCrawlMode(final BookCrawlMode bookCrawlerMode);
 
-    @AboutConfig
-    @DefaultBooleanValue(true)
-    @Order(41)
-    boolean isMarkNonViewableBookPagesAsOfflineIfNoAccountIsAvailable();
+    class DefaultNonDownloadableBookPagesMode extends AbstractDefaultFactory<NonDownloadableBookPagesMode> {
+        @Override
+        public NonDownloadableBookPagesMode getDefaultValue(KeyHandler<NonDownloadableBookPagesMode> keyHandler) {
+            final Storage storage;
+            if (keyHandler != null && (storage = keyHandler.getStorageHandler().getPrimitiveStorage(keyHandler)) != null) {
+                if (storage.hasProperty("marknonviewablebookpagesasofflineifnoaccountisavailable")) {
+                    if (Boolean.FALSE.equals(storage.remove("marknonviewablebookpagesasofflineifnoaccountisavailable"))) {
+                        return NonDownloadableBookPagesMode.SET_AVAILABLE_STATUS_ONLINE;
+                    }
+                }
+            }
+            return NonDownloadableBookPagesMode.SET_AVAILABLE_STATUS_OFFLINE;
+        }
+    }
 
-    void setMarkNonViewableBookPagesAsOfflineIfNoAccountIsAvailable(boolean b);
+    @AboutConfig
+    @DefaultFactory(DefaultNonDownloadableBookPagesMode.class)
+    // @DefaultEnumValue("SET_AVAILABLE_STATUS_OFFLINE")
+    @Order(41)
+    NonDownloadableBookPagesMode getNonDownloadableBookPagesMode();
+
+    void setNonDownloadableBookPagesMode(final NonDownloadableBookPagesMode mode);
+
+    public static enum NonDownloadableBookPagesMode implements LabelInterface {
+        SET_AVAILABLE_STATUS_OFFLINE {
+            @Override
+            public String getLabel() {
+                return "Display as offline";
+            }
+        },
+        SET_AVAILABLE_STATUS_ONLINE {
+            @Override
+            public String getLabel() {
+                return "Display as online (download will fail with error status)";
+            }
+        };
+    }
 
     final PlaylistCrawlMode default_PlaylistCrawlMode = PlaylistCrawlMode.AUTO;
 
@@ -246,13 +348,13 @@ public interface ArchiveOrgConfig extends PluginConfigInterface {
         PLAYLIST_AND_FILES {
             @Override
             public String getLabel() {
-                return "Playlist and files";
+                return "Playlist and selected files";
             }
         },
         FILES_ONLY {
             @Override
             public String getLabel() {
-                return "Files only";
+                return "Selected files only";
             }
         },
         AUTO {
