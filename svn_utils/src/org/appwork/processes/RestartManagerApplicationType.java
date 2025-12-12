@@ -34,95 +34,79 @@
  * ==================================================================================================================================================== */
 package org.appwork.processes;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.List;
-
-import org.appwork.utils.duration.TimeSpan;
-import org.appwork.utils.os.NotSupportedException;
-
 /**
+ * Enumeration for Windows Restart Manager Application Types.
+ * 
  * @author thomas
- * @date 19.11.2024
+ * @date 11.12.2025
  *
  */
-public class NotSupportedProcessHandler implements ProcessHandler {
+public enum RestartManagerApplicationType {
     /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#listByPath(java.lang.String)
+     * Unknown application type
      */
-    @Override
-    public List<ProcessInfo> listByPath(String pathStartsWith) throws IOException, NotSupportedException {
-        throw new NotSupportedException("No Supported");
+    UNKNOWN(0, "Unknown"),
+    /**
+     * Application has a main window
+     */
+    MAIN_WINDOW(1, "MainWindow"),
+    /**
+     * Application has other windows
+     */
+    OTHER_WINDOW(2, "OtherWindow"),
+    /**
+     * Windows service
+     */
+    SERVICE(3, "Service"),
+    /**
+     * Windows Explorer
+     */
+    EXPLORER(4, "Explorer"),
+    /**
+     * Console application
+     */
+    CONSOLE(5, "Console"),
+    /**
+     * Invalid application type
+     */
+    INVALID(6, "Invalid");
+
+    private final int    value;
+    private final String readableName;
+
+    private RestartManagerApplicationType(int value, String readableName) {
+        this.value = value;
+        this.readableName = readableName;
     }
 
     /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#listByPids(int[])
+     * @return the value
      */
-    @Override
-    public List<ProcessInfo> listByPids(int... pids) throws IOException, NotSupportedException {
-        throw new NotSupportedException("No Supported");
+    public int getValue() {
+        return value;
     }
 
     /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#terminateForced(org.appwork.processes.ProcessInfo, int)
+     * @return the readableName
      */
-    @Override
-    public boolean terminateForced(ProcessInfo process, int exitCode) throws IOException, NotSupportedException {
-        throw new NotSupportedException("No Supported");
+    public String getReadableName() {
+        return readableName;
     }
 
     /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#waitForExit(org.appwork.utils.duration.TimeSpan, org.appwork.processes.ProcessInfo[])
+     * Converts an integer value to the corresponding enum value.
+     * 
+     * @param value
+     *            The integer value from RM_PROCESS_INFO.ApplicationType
+     * @return The corresponding enum value, or UNKNOWN if the value is not recognized
      */
-    @Override
-    public List<ProcessInfo> waitForExit(TimeSpan maxWait, ProcessInfo... processes) throws IOException, InterruptedException, NotSupportedException {
-        throw new NotSupportedException("No Supported");
-    }
-
-    /**
-     * @see org.appwork.processes.ProcessHandler#listByProcessInfo(org.appwork.processes.ProcessInfo[])
-     */
-    @Override
-    public List<ProcessInfo> listByProcessInfo(ProcessInfo... processes) throws NotSupportedException, IOException {
-        throw new NotSupportedException("No Supported");
-    }
-
-    /**
-     * @see org.appwork.processes.ProcessHandler#terminateRequest(org.appwork.processes.ProcessInfo)
-     */
-    @Override
-    public boolean terminateRequest(ProcessInfo process) throws NotSupportedException, IOException {
-        throw new NotSupportedException("No Supported");
-    }
-
-    /**
-     * @see org.appwork.processes.ProcessHandler#terminateForcedAfterRequest(org.appwork.utils.duration.TimeSpan, int,
-     *      org.appwork.processes.ProcessInfo[])
-     */
-    @Override
-    public boolean terminateForcedAfterRequest(TimeSpan waitForSoftClose, int exitCode, ProcessInfo... processes) throws IOException, NotSupportedException, InterruptedException {
-        throw new NotSupportedException("No Supported");
-    }
-
-    /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#toFront(org.appwork.processes.ProcessInfo[])
-     */
-    @Override
-    public int toFront(ProcessInfo... processes) throws IOException, InterruptedException, NotSupportedException {
-        throw new NotSupportedException("No Supported");
-    }
-
-    /**
-     * @throws NotSupportedException
-     * @see org.appwork.processes.ProcessHandler#getLockingProcesses(java.io.File)
-     */
-    @Override
-    public List<ProcessInfo> getLockingProcesses(File file) throws IOException, NotSupportedException, InterruptedException {
-        throw new NotSupportedException("No Supported");
+    public static RestartManagerApplicationType fromValue(int value) {
+        for (RestartManagerApplicationType type : values()) {
+            if (type.value == value) {
+                return type;
+            }
+        }
+        return UNKNOWN;
     }
 }
+
