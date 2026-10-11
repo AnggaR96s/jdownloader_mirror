@@ -41,6 +41,25 @@ jobs:
         cd "$GITHUB_WORKSPACE"
         du -sh *
 
+    - name: Drop oversized binaries
+      run: |
+        cd "$GITHUB_WORKSPACE"
+        # Upstream ships ffmpeg/ffprobe builds over GitHub's 100 MiB hard limit.
+        # A single one of them makes the pre-receive hook reject the whole push,
+        # which stalls the mirror. Keep the newest version that fits instead.
+        LIMIT=$((99 * 1024 * 1024))
+
+        # Tracked files that the svn update changed: restore the committed version.
+        while IFS= read -r -d '' f; do
+          [ -f "$f" ] || continue
+          [ "$(stat -c%s "$f")" -le "$LIMIT" ] || { echo "oversized, keeping old: $f"; git checkout -- "$f"; }
+        done < <(git diff --name-only -z)
+
+        # New (untracked) files: drop them entirely.
+        while IFS= read -r -d '' f; do
+          [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -le "$LIMIT" ] || { echo "oversized, dropping new: $f"; rm -f -- "$f"; }
+        done < <(git ls-files --others --exclude-standard -z)
+
     - name: Git commit 
       run: |
         cd "$GITHUB_WORKSPACE"
@@ -48,5 +67,10 @@ jobs:
         git config user.email github-actions@github.com
         
         git add -A
+
+        # Hard stop before pushing if anything is still above GitHub's limit.
+        git ls-files -z | xargs -0 -r stat -c '%s %n' \
+          | awk -v l="$((100 * 1024 * 1024))" '$1 > l { print "too big: " $0; bad = 1 } END { exit bad }'
+
         git commit -m "mirroring bot - $(date '+%Y/%m/%d')"
         git push origin --force
