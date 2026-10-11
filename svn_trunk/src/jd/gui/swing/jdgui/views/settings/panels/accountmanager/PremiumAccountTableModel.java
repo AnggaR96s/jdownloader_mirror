@@ -9,7 +9,9 @@ import java.text.FieldPosition;
 import java.util.ArrayList;
 import java.util.Currency;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 
 import javax.swing.Icon;
@@ -22,6 +24,7 @@ import org.appwork.storage.config.JsonConfig;
 import org.appwork.swing.components.ExtMergedIcon;
 import org.appwork.swing.exttable.ExtColumn;
 import org.appwork.swing.exttable.ExtDefaultRowSorter;
+import org.appwork.swing.exttable.ExtTable;
 import org.appwork.swing.exttable.ExtTableHeaderRenderer;
 import org.appwork.swing.exttable.ExtTableModel;
 import org.appwork.swing.exttable.columns.ExtCheckColumn;
@@ -44,6 +47,7 @@ import org.jdownloader.plugins.controller.LazyPlugin.FEATURE;
 import org.jdownloader.settings.GraphicalUserInterfaceSettings;
 import org.jdownloader.settings.GraphicalUserInterfaceSettings.SIZEUNIT;
 import org.jdownloader.settings.staticreferences.CFG_GUI;
+import org.jdownloader.updatev2.gui.LAFOptions;
 
 import jd.SecondLevelLaunch;
 import jd.controlling.AccountController;
@@ -121,13 +125,19 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
                 return _GUI.T.premiumaccounttablemodel_column_trafficleft_tempdisabled(TimeFormatter.formatMilliSeconds(timeout, 0));
             }
             if (plg != null && plg.hasFeature(FEATURE.CAPTCHA_SOLVER)) {
-                /* Captcha solver accounts have no download traffic */
-                String balanceStr = "0";
+                /**
+                 * Captcha solver accounts have no download traffic: show the AccountInfo status text instead (or nothing) <br>
+                 * The account status text will usually contain info about balance like: "Balance: 13,37€"
+                 */
                 final AccountInfo ai = acc.getAccountInfo();
+                String ret = null;
                 if (ai != null) {
-                    balanceStr = ai.getAccountBalanceFormatted();
+                    final String balanceformatted = ai.getAccountBalanceFormatted();
+                    if (balanceformatted != null) {
+                        ret = _GUI.T.CaptchaSolverAccount_balance(balanceformatted);
+                    }
                 }
-                return "Balance: " + balanceStr;
+                return StringUtils.isEmpty(ret) ? "" : ret;
             }
             final AccountTrafficView accountTrafficView = acc.getAccountTrafficView();
             if (accountTrafficView == null) {
@@ -369,6 +379,7 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
     protected void initColumns() {
         addEnabledColumn();
         addColumnHoster();
+        addTypeColumn();
         addStatusColumn();
         addUsernameColumn();
         addPasswordColumn();
@@ -513,6 +524,27 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
             // protected String getTooltipText(AccountEntry obj) {
             // return obj.getAccount().getHoster();
             // }
+            @Override
+            public void resetRenderer() {
+                super.resetRenderer();
+                /* Back to the inherited default color (the warning color below is set per cell). */
+                this.rendererField.setForeground(null);
+            }
+
+            @Override
+            public void configureRendererComponent(AccountEntry value, boolean isSelected, boolean hasFocus, int row, int column) {
+                super.configureRendererComponent(value, isSelected, hasFocus, row, column);
+                final Account account = value.getAccount();
+                if (account.isValid() && !account.isTempDisabled() && account.isLowBalance()) {
+                    /*
+                     * Captcha solver account with low balance: show its status text (which contains the low balance warning) in the theme's
+                     * error color. Not for invalid/temp disabled accounts: Their whole row is already highlighted by the row highlighters of
+                     * the table (see PremiumAccountTable), so an error colored text would be red on red.
+                     */
+                    this.rendererField.setForeground(LAFOptions.getInstance().getColorForErrorForeground());
+                }
+            }
+
             @Override
             public String getStringValue(AccountEntry value) {
                 return accountToStatusString(value.getAccount());
@@ -665,7 +697,8 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
 
             @Override
             public boolean isEnabled(AccountEntry obj) {
-                return true;
+                /* Gray out the button for accounts without settings. */
+                return obj.hasConfiguration();
             }
 
             @Override
@@ -675,7 +708,8 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
 
             @Override
             public boolean isEditable(AccountEntry obj) {
-                return super.isEditable(obj);
+                /* A button without settings behind it must not be clickable. */
+                return obj.hasConfiguration() && super.isEditable(obj);
             }
 
             @Override
@@ -795,6 +829,95 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
         });
     }
 
+    /**
+     * The plugin-category of an account, as opposed to {@link jd.plugins.Account.AccountType} which describes the premium status
+     * (free/premium/lifetime).
+     */
+    protected static enum AccountManagerType {
+        MULTIHOST,
+        CAPTCHA_SOLVER,
+        DOWNLOAD
+    }
+
+    protected AccountManagerType getAccountManagerType(final Account acc) {
+        final PluginForHost plg = acc.getPlugin();
+        if (plg != null && plg.hasFeature(FEATURE.CAPTCHA_SOLVER)) {
+            return AccountManagerType.CAPTCHA_SOLVER;
+        } else if (acc.isMultiHost()) {
+            return AccountManagerType.MULTIHOST;
+        } else {
+            return AccountManagerType.DOWNLOAD;
+        }
+    }
+
+    protected void addTypeColumn() {
+        this.addColumn(new ExtTextColumn<AccountEntry>(_GUI.T.premiumaccounttablemodel_column_type()) {
+            private static final long serialVersionUID = 1L;
+            {
+                replaceSorter(this);
+            }
+
+            @Override
+            public boolean isEnabled(AccountEntry obj) {
+                return obj.getAccount().isEnabled();
+            }
+
+            @Override
+            public boolean isSortable(AccountEntry obj) {
+                return PremiumAccountTableModel.this.isSortable();
+            }
+
+            @Override
+            public boolean isDefaultVisible() {
+                return false;
+            }
+
+            @Override
+            public boolean isVisible(final boolean savedValue) {
+                final ExtTable<AccountEntry> table = getModel().getTable();
+                if (table != null && table.getStorage().hasProperty(table.getColumnStoreKey("VISABLE_COL_", getID()))) {
+                    /* The user has an explicit show/hide preference for this column - always respect it. */
+                    return savedValue;
+                }
+                /*
+                 * No explicit user preference stored yet: this column only adds information once the account list mixes different account
+                 * types, so only show it automatically when at least two different types are present.
+                 */
+                final Set<AccountManagerType> types = new HashSet<AccountManagerType>();
+                for (final AccountEntry entry : PremiumAccountTableModel.this.getTableData()) {
+                    types.add(getAccountManagerType(entry.getAccount()));
+                    if (types.size() >= 2) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public int getDefaultWidth() {
+                return 90;
+            }
+
+            @Override
+            public int getMinWidth() {
+                return 60;
+            }
+
+            @Override
+            public String getStringValue(AccountEntry value) {
+                switch (getAccountManagerType(value.getAccount())) {
+                case CAPTCHA_SOLVER:
+                    return _GUI.T.premiumaccounttablemodel_type_captchasolver();
+                case MULTIHOST:
+                    return _GUI.T.premiumaccounttablemodel_type_multihoster();
+                case DOWNLOAD:
+                default:
+                    return _GUI.T.premiumaccounttablemodel_type_download();
+                }
+            }
+        });
+    }
+
     protected boolean isSortable() {
         return true;
     }
@@ -891,9 +1014,12 @@ public class PremiumAccountTableModel extends ExtTableModel<AccountEntry> implem
                         return errString;
                     }
                     ret = _GUI.T.PremiumAccountTableModel_getStringValue_temp_disabled2(ret);
-                } else {
-                    ret = _GUI.T.PremiumAccountTableModel_getStringValue_account_ok_2(ret);
                 }
+                /* Account is ok: show the plain status without a redundant "Account is ok:" prefix */
+            }
+            if (!value.isTempDisabled()) {
+                /* Captcha solver account with low balance: empty String if not applicable. */
+                ret += value.getLowBalanceStatusSuffix();
             }
             return ret;
         }

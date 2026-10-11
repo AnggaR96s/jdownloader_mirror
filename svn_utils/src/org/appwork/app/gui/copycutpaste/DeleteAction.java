@@ -60,17 +60,15 @@ public class DeleteAction extends AbstractAction {
         this.putValue(Action.ACCELERATOR_KEY, KeyStroke.getKeyStroke("DELETE"));
     }
 
-    /*
-     * (non-Javadoc)
-     *
-     * @see com.rapidshare.utils.event.Event.ActionListener#actionPerformed(com. rapidshare.utils.event.Event.ActionEvent)
-     */
     public void actionPerformed(final ActionEvent e) {
+        if (text == null || !this.text.isEditable() || !this.text.isEnabled()) {
+            return;
+        }
         this.text.replaceSelection(null);
     }
 
     @Override
     public boolean isEnabled() {
-        return this.text.isEnabled() && this.text.getSelectedText() != null;
+        return text != null && this.text.isEditable() && this.text.isEnabled() && this.text.getSelectedText() != null;
     }
 }

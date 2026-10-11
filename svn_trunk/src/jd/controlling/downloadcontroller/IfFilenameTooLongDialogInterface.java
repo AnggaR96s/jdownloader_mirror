@@ -3,7 +3,8 @@ package jd.controlling.downloadcontroller;
 import org.appwork.uio.In;
 import org.appwork.uio.Out;
 import org.appwork.utils.swing.dialog.OKCancelCloseUserIODefinition;
-import org.jdownloader.settings.IfFilenameTooLongAction;
+
+import jd.controlling.downloadcontroller.IfFilenameTooLongDialog.IfFilenameTooLongAction;
 
 public interface IfFilenameTooLongDialogInterface extends OKCancelCloseUserIODefinition {
     @In
@@ -23,4 +24,11 @@ public interface IfFilenameTooLongDialogInterface extends OKCancelCloseUserIODef
 
     @Out
     public String getNewFilename();
+
+    @In
+    public boolean isRememberForPackageSelected();
+
+    /** True when the chosen action should be remembered for the rest of the current session ("Don't ask again during this session"). */
+    @In
+    public boolean isDontAskAgainThisSessionSelected();
 }

@@ -145,7 +145,6 @@ public class Browser implements HTTPConnectionFactoryInterface {
         STRICT_ORIGIN,
         STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
         UNSAFE_URL;
-
         public static boolean isSameProtocol(final Request current, final Request next) {
             return StringUtils.equalsIgnoreCase(current.getURL().getProtocol(), next.getURL().getProtocol());
         }
@@ -737,7 +736,7 @@ public class Browser implements HTTPConnectionFactoryInterface {
     private String                              acceptLanguage        = "de, en-gb;q=0.9, en;q=0.8";
     /*
      * -1 means use default Timeouts
-     *
+     * 
      * 0 means infinite (DO NOT USE if not needed)
      */
     private int                                 connectTimeout        = -1;
@@ -1070,7 +1069,7 @@ public class Browser implements HTTPConnectionFactoryInterface {
     /**
      * Creates a new postrequest based an an requestVariable ArrayList
      *
-     * @deprecated use {@link #createPostRequest(String, UrlQuery, String)
+     * @deprecated use {@link #createPostRequest(String, UrlQuery, String)
      *
      *
      *
@@ -1824,6 +1823,10 @@ public class Browser implements HTTPConnectionFactoryInterface {
         return Browser.VERBOSE || this.verbose;
     }
 
+    protected Request onRequestRead(Request request) throws IOException {
+        return request.read(this.isKeepResponseContentBytes());
+    }
+
     /**
      * Reads the content behind a con and returns them. Note: if con==null, the current request is read. This is useful for redirects. Note
      * #2: if a connection is loaded, data is not stored in the browser instance.
@@ -1863,14 +1866,14 @@ public class Browser implements HTTPConnectionFactoryInterface {
             this.prepareBlockDetectionBeforeLoadConnection(requ);
             try {
                 try {
-                    requ.read(this.isKeepResponseContentBytes());
+                    onRequestRead(requ);
                 } catch (HTTPResponseCodeException e) {
                     final URLConnectionAdapter con = requ.getHttpConnection();
                     if (con != null) {
                         try {
                             con.setAllResponseCodesAllowed(true);
                             try {
-                                requ.read(this.isKeepResponseContentBytes());
+                                onRequestRead(requ);
                             } finally {
                                 con.setAllResponseCodesAllowed(false);
                             }
@@ -1913,15 +1916,15 @@ public class Browser implements HTTPConnectionFactoryInterface {
     }
 
     /**
-     * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Sec-Fetch-Site </br>
-     * auto completes Sec-Fetch-Site, some websites(eg facebook) check it
+     * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Sec-Fetch-Site </br> auto completes Sec-Fetch-Site, some websites(eg
+     * facebook) check it
      */
     protected void autoCompleteHeaders(final Request request) {
         if (request == null) {
             return;
         }
         final RequestHeader requestHeaders = request.getHeaders();
-        if (requestHeaders.getValue("Sec-Fetch-Site") != null) {
+        if (requestHeaders.getValue(HTTPConstants.HEADER_REQUEST_SEC_FETCH_SITE) != null) {
             return;
         }
         boolean addSecFetchSite = false;
@@ -1945,9 +1948,10 @@ public class Browser implements HTTPConnectionFactoryInterface {
         if (edgeVersion >= 79) {
             addSecFetchSite = true;
         }
-        if (addSecFetchSite) {
-            requestHeaders.put(new HTTPHeader("Sec-Fetch-Site", "same-origin"));
+        if (!addSecFetchSite) {
+            return;
         }
+        requestHeaders.put(new HTTPHeader(HTTPConstants.HEADER_REQUEST_SEC_FETCH_SITE, "same-origin"));
     }
 
     /**
@@ -2708,8 +2712,7 @@ public class Browser implements HTTPConnectionFactoryInterface {
     }
 
     /**
-     * Sets Browser upper page load limit Byte value. </br>
-     * Use Integer.MAX_VALUE for "unlimited" (do not use "-1"!).
+     * Sets Browser upper page load limit Byte value. </br> Use Integer.MAX_VALUE for "unlimited" (do not use "-1"!).
      *
      * @since JD2
      * @param i
@@ -2860,8 +2863,7 @@ public class Browser implements HTTPConnectionFactoryInterface {
     }
 
     /**
-     * Checks for block by firewalls and similar. </br>
-     * To be called after a sent request.
+     * Checks for block by firewalls and similar. </br> To be called after a sent request.
      */
     public void checkForBlockedByAfterLoadConnection(Request request) throws IOException {
         if (!this.getThrowExceptionOnBlockedBy(request)) {
@@ -2893,8 +2895,7 @@ public class Browser implements HTTPConnectionFactoryInterface {
         /* 520: Web server is returning an unknown error | 526: Invalid SSL certificate */
         /**
          * TODO: 2023-12-21: Maybe remove reliance on http status-code as it looks like literally any status code can be returned when a
-         * Cloudflare block happens. </br>
-         * I've just added code 502 to the list of "Cloudflare response-codes".
+         * Cloudflare block happens. </br> I've just added code 502 to the list of "Cloudflare response-codes".
          */
         /*
          * It is really important to also check for Cloudflare html else stuff will fail/break e.g. icerbox.com wrong login -> Cloudflare
@@ -3228,7 +3229,8 @@ public class Browser implements HTTPConnectionFactoryInterface {
                 if (request == null || !request.isLoaded() || (con = request.getHttpConnection()) == null) {
                     return null;
                 }
-                if (con.getResponseCode() == 200 && StringUtils.equalsIgnoreCase(request.getResponseHeader("server"), "EdgeOne_L7S_OC") && StringUtils.startsWithCaseInsensitive(request.getHtmlCode(), "<script>")) {
+                final String server = request.getResponseHeader(HTTPConstants.HEADER_RESPONSE_SERVER);
+                if ((con.getResponseCode() == 200 && StringUtils.containsIgnoreCase(server, "EdgeOne") || StringUtils.contains(server, "TencentEdgeOne") || request.getResponseHeader("EO-LOG-UUID") != null) && StringUtils.containsIgnoreCase(request.getHtmlCode(), "solveChallenge not loaded yet")) {
                     return this;
                 }
                 return null;
@@ -3802,8 +3804,8 @@ public class Browser implements HTTPConnectionFactoryInterface {
                     return null;
                 }
                 if (true) { /*
-                             * TODO: Add header based detection too -> At least check "server" header so we do not only rely on html code.
-                             */
+                 * TODO: Add header based detection too -> At least check "server" header so we do not only rely on html code.
+                 */
                     /* See new ESET NOD32 html code 2023: https://board.jdownloader.org/showthread.php?t=91433 */
                     return null;
                 }
@@ -4027,8 +4029,8 @@ public class Browser implements HTTPConnectionFactoryInterface {
     }
 
     /**
-     * Returns true if any antiddos provider/other sort of blocking is blocking at this moment. </br>
-     * See also: https://svn.jdownloader.org/issues/89834
+     * Returns true if any antiddos provider/other sort of blocking is blocking at this moment. </br> See also:
+     * https://svn.jdownloader.org/issues/89834
      */
     public boolean isBlocked() {
         final Request request = this.getRequest();

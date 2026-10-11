@@ -40,7 +40,7 @@ import org.appwork.storage.TypeRef;
 import org.appwork.utils.StringUtils;
 import org.appwork.utils.net.URLHelper;
 
-@DecrypterPlugin(revision = "$Revision: 51179 $", interfaceVersion = 3, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 53476 $", interfaceVersion = 3, names = {}, urls = {})
 @PluginDependencies(dependencies = { PixeldrainCom.class })
 public class PixeldrainComFolder extends PluginForDecrypt {
     public PixeldrainComFolder(PluginWrapper wrapper) {
@@ -84,7 +84,7 @@ public class PixeldrainComFolder extends PluginForDecrypt {
         this.br = hosterplugin.createNewBrowserInstance();
         if (listregex.patternFind()) {
             final String listID = listregex.getMatch(0);
-            br.getPage(PixeldrainCom.getAPIBase(this) + "/list/" + listID);
+            br.getPage(PixeldrainCom.getAPIBase(this, br) + "/list/" + listID);
             if (br.getHttpConnection().getResponseCode() == 404) {
                 /* 2020-10-01: E.g. {"success":false,"value":"not_found","message":"The entity you requested could not be found"} */
                 throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
@@ -107,7 +107,7 @@ public class PixeldrainComFolder extends PluginForDecrypt {
                 final DownloadLink dl = this.createDownloadlink(generateFileURL(file.get("id").toString()));
                 dl.setContentUrl(generateContentURL(listID, index));
                 dl.setContainerUrl(param.getCryptedUrl());
-                PixeldrainCom.setDownloadLinkInfo(this, dl, null, file);
+                PixeldrainCom.setDownloadLinkInfo(this, br, dl, null, file);
                 if (targetIndex != null && index == targetIndex.intValue()) {
                     /* User wants only one item within that folder */
                     logger.info("Found target-file at index: " + index + " | " + dl.getFinalFileName() + " | Returning only this file!");
@@ -138,7 +138,7 @@ public class PixeldrainComFolder extends PluginForDecrypt {
                 throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
             }
             /* Append "?stat" so even if we got a direct-URL we will get a json response and not a file. */
-            br.getPage(PixeldrainCom.getAPIBase(this) + "/filesystem/" + folderPath + "?stat");
+            br.getPage(PixeldrainCom.getAPIBase(this, br) + "/filesystem/" + folderPath + "?stat");
             if (br.getHttpConnection().getResponseCode() == 404) {
                 /* E.g. {"success":false,"value":"not_found","message":"The entity you requested could not be found"} */
                 throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);

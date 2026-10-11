@@ -558,8 +558,13 @@ public class HttpServerConnection implements HttpConnectionRunnable, RawHttpConn
      * @param res
      */
     protected void configure(HttpRequest request, HttpResponse response) {
+        DebugMode.breakIf(response == null, null);
+        if (response == null) {
+            // for example for EmptyRequestException, no HttpResponse instance available yet
+            return;
+        }
         response.getResponseHeaders().add(new HTTPHeader(HTTPConstants.HEADER_REQUEST_CONNECTION, "close"));
-        AbstractServerBasics server = getServer();
+        final AbstractServerBasics server = getServer();
         {
             String serverHeader = server.getResponseServerHeader();
             if (!StringUtils.isEmpty(serverHeader)) {
@@ -968,23 +973,26 @@ public class HttpServerConnection implements HttpConnectionRunnable, RawHttpConn
             final HttpRequest request;
             final HttpResponse response;
             try {
-                if (this.request == null) {
-                    final long buildRequestStartTime = Time.systemIndependentCurrentJVMTimeMillis();
-                    if (isVerboseLogEnabled()) {
-                        LogV3.fine("HttpConnection.run: Starting buildRequest()");
+                try {
+                    if (this.request == null) {
+                        final long buildRequestStartTime = Time.systemIndependentCurrentJVMTimeMillis();
+                        if (isVerboseLogEnabled()) {
+                            LogV3.fine("HttpConnection.run: Starting buildRequest()");
+                        }
+                        this.request = this.buildRequest();
+                        final long buildRequestElapsed = Time.systemIndependentCurrentJVMTimeMillis() - buildRequestStartTime;
+                        if (isVerboseLogEnabled()) {
+                            LogV3.fine("HttpConnection.run: buildRequest() completed in " + buildRequestElapsed + "ms");
+                        }
                     }
-                    this.request = this.buildRequest();
-                    final long buildRequestElapsed = Time.systemIndependentCurrentJVMTimeMillis() - buildRequestStartTime;
-                    if (isVerboseLogEnabled()) {
-                        LogV3.fine("HttpConnection.run: buildRequest() completed in " + buildRequestElapsed + "ms");
-                    }
-                }
-                if (this.response == null) {
-                    final long buildResponseStartTime = Time.systemIndependentCurrentJVMTimeMillis();
-                    this.response = this.buildResponse();
-                    final long buildResponseElapsed = Time.systemIndependentCurrentJVMTimeMillis() - buildResponseStartTime;
-                    if (isVerboseLogEnabled()) {
-                        LogV3.fine("HttpConnection.run: buildResponse() completed in " + buildResponseElapsed + "ms");
+                } finally {
+                    if (this.response == null) {
+                        final long buildResponseStartTime = Time.systemIndependentCurrentJVMTimeMillis();
+                        this.response = this.buildResponse();
+                        final long buildResponseElapsed = Time.systemIndependentCurrentJVMTimeMillis() - buildResponseStartTime;
+                        if (isVerboseLogEnabled()) {
+                            LogV3.fine("HttpConnection.run: buildResponse() completed in " + buildResponseElapsed + "ms");
+                        }
                     }
                 }
             } finally {

@@ -29,6 +29,37 @@ import java.util.regex.Pattern;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 
+import jd.PluginWrapper;
+import jd.config.SubConfiguration;
+import jd.controlling.AccountController;
+import jd.controlling.linkcrawler.LinkCrawlerDeepInspector;
+import jd.http.Browser;
+import jd.http.Cookies;
+import jd.http.Request;
+import jd.http.URLConnectionAdapter;
+import jd.http.requests.GetRequest;
+import jd.nutils.encoding.Encoding;
+import jd.parser.html.Form;
+import jd.parser.html.Form.MethodType;
+import jd.parser.html.HTMLParser;
+import jd.parser.html.InputField;
+import jd.plugins.Account;
+import jd.plugins.Account.AccountType;
+import jd.plugins.AccountInfo;
+import jd.plugins.AccountInvalidException;
+import jd.plugins.AccountRequiredException;
+import jd.plugins.AccountUnavailableException;
+import jd.plugins.DownloadConnectionVerifier;
+import jd.plugins.DownloadLink;
+import jd.plugins.DownloadLink.AvailableStatus;
+import jd.plugins.HostPlugin;
+import jd.plugins.LinkStatus;
+import jd.plugins.Plugin;
+import jd.plugins.PluginException;
+import jd.plugins.PluginForHost;
+import jd.plugins.components.PluginJSonUtils;
+import jd.plugins.components.SiteType.SiteTemplate;
+
 import org.appwork.net.protocol.http.HTTPConstants;
 import org.appwork.storage.JSonMapperException;
 import org.appwork.storage.TypeRef;
@@ -62,38 +93,7 @@ import org.jdownloader.plugins.controller.host.LazyHostPlugin;
 import org.jdownloader.scripting.JavaScriptEngineFactory;
 import org.mozilla.javascript.EcmaError;
 
-import jd.PluginWrapper;
-import jd.config.SubConfiguration;
-import jd.controlling.AccountController;
-import jd.controlling.linkcrawler.LinkCrawlerDeepInspector;
-import jd.http.Browser;
-import jd.http.Cookies;
-import jd.http.Request;
-import jd.http.URLConnectionAdapter;
-import jd.http.requests.GetRequest;
-import jd.nutils.encoding.Encoding;
-import jd.parser.html.Form;
-import jd.parser.html.Form.MethodType;
-import jd.parser.html.HTMLParser;
-import jd.parser.html.InputField;
-import jd.plugins.Account;
-import jd.plugins.Account.AccountType;
-import jd.plugins.AccountInfo;
-import jd.plugins.AccountInvalidException;
-import jd.plugins.AccountRequiredException;
-import jd.plugins.AccountUnavailableException;
-import jd.plugins.DownloadConnectionVerifier;
-import jd.plugins.DownloadLink;
-import jd.plugins.DownloadLink.AvailableStatus;
-import jd.plugins.HostPlugin;
-import jd.plugins.LinkStatus;
-import jd.plugins.Plugin;
-import jd.plugins.PluginException;
-import jd.plugins.PluginForHost;
-import jd.plugins.components.PluginJSonUtils;
-import jd.plugins.components.SiteType.SiteTemplate;
-
-@HostPlugin(revision = "$Revision: 53185 $", interfaceVersion = 2, names = {}, urls = {})
+@HostPlugin(revision = "$Revision: 53556 $", interfaceVersion = 2, names = {}, urls = {})
 public abstract class XFileSharingProBasic extends antiDDoSForHost implements DownloadConnectionVerifier {
     public XFileSharingProBasic(PluginWrapper wrapper) {
         super(wrapper);
@@ -489,8 +489,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      * don't display the filesize anywhere! <br>
      * CAUTION: Only set this to true if a filehost: <br>
      * 1. Allows users to embed videos via '/embed-<fuid>.html'. <br>
-     * 2. Does not display a filesize anywhere inside html code or other calls where we do not have to do an http request on a directurl.
-     * <br>
+     * 2. Does not display a filesize anywhere inside html code or other calls where we do not have to do an http request on a directurl. <br>
      * 3. Allows a lot of simultaneous connections. <br>
      * 4. Is FAST - if it is not fast, this will noticably slow down the linkchecking procedure! <br>
      * 5. Allows using a generated direct-URL at least two times.
@@ -689,6 +688,10 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      */
     protected String getNormalizedDownloadURL(final DownloadLink link) {
         final String fuid = this.getFUIDFromURL(link);
+        if (fuid == null) {
+            /* Without a fuid we cannot build URLs. */
+            return this.getContentURL(link);
+        }
         final String base;
         if (this.br != null && this.br.getRequest() != null) {
             /* A request has already been made -> Prefer that host. */
@@ -696,10 +699,6 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
         } else {
             /* No request has been made yet -> Derive host from link so that a subdomain in the original URL is preserved. */
             base = this.getMainPage(link);
-        }
-        if (fuid == null) {
-            /* Without a fuid we cannot build URLs. */
-            return this.getContentURL(link);
         }
         final URL_TYPE urltype = this.getURLType(link);
         if (urltype == URL_TYPE.EMBED_VIDEO) {
@@ -816,6 +815,13 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             domainToUse = this.getHost();
         } else {
             domainToUse = urlHost;
+        }
+        return buildMainPage(url, domainToUse);
+    }
+
+    protected String buildMainPage(final URL url, String domainToUse) {
+        if (domainToUse == null) {
+            domainToUse = url.getHost();
         }
         final String protocol;
         if (this.useHTTPS()) {
@@ -1015,6 +1021,9 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             return true;
         } else if (br.containsHTML(prefix + "File is not? longer available as it")) {
             return true;
+        } else if (br.containsHTML("^File was deleted$")) {
+            /* Should be valid for all XFS hosts e.g. speedvideo.net, uqload.com */
+            return true;
         } else {
             return false;
         }
@@ -1031,7 +1040,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
         if (enableAccountApiOnlyMode() || (this.supportsAPIMassLinkcheck() && this.looksLikeValidAPIKey(apiKey))) {
             return massLinkcheckerAPI(urls, apiKey);
         } else if (supportsMassLinkcheckOverWebsite()) {
-            return this.massLinkcheckerWebsite(urls);
+            return this.massLinkcheckerWebsite(br, null, urls);
         } else {
             /* No mass linkchecking possible */
             return false;
@@ -1054,7 +1063,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
 
     @Override
     public AvailableStatus requestFileInformation(final DownloadLink link) throws Exception {
-        return requestFileInformation(link, null);
+        return requestFileInformation(link, AccountController.getInstance().getValidAccount(this));
     }
 
     protected AvailableStatus requestFileInformation(final DownloadLink link, final Account account) throws Exception {
@@ -1064,7 +1073,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             return this.requestFileInformationAPI(link, apikey);
         } else {
             /* Website linkcheck */
-            return requestFileInformationWebsite(link, null);
+            return requestFileInformationWebsite(link, account);
         }
     }
 
@@ -1139,6 +1148,11 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
         }
     }
 
+    protected boolean useAccountForLinkCheck(final Browser br, final Account account, final DownloadLink link) throws Exception {
+        // for example: terabytez.org
+        return account != null && !this.enableAccountApiOnlyMode();
+    }
+
     /**
      * Handling for older / standard XFS links for examle: <br>
      * https://xfswebsite.tld/[a-z0-9]{12} <br>
@@ -1205,7 +1219,17 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
         }
         final String[] fileInfo = internal_getFileInfoArray();
         final Browser altbr = br.cloneBrowser();
-        if (isPremiumOnlyURL(this.br)) {
+        if (isPremiumOnlyURL(altbr)) {
+            // dirty hack because loginWebsite doesn't have Browser parameter yet
+            if (useAccountForLinkCheck(altbr, account, link)) {
+                final Browser brOld = this.br;
+                try {
+                    this.br = altbr;
+                    loginWebsite(link, account, false);
+                } finally {
+                    this.br = brOld;
+                }
+            }
             /*
              * Hosts whose urls are all premiumonly usually don't display any information about the URL at all - only maybe online/offline.
              * There are 2 alternative ways to get this information anyways!
@@ -1217,7 +1241,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             }
             /* Find filesize */
             if (this.internal_supports_availablecheck_alt()) {
-                getFilesizeViaAvailablecheckAlt(altbr, link);
+                getFilesizeViaAvailablecheckAlt(altbr, account, link);
             }
         } else {
             /* Normal handling */
@@ -1251,7 +1275,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             /* Filesize fallback */
             if (StringUtils.isEmpty(fileInfo[1]) && this.internal_supports_availablecheck_alt()) {
                 /* Failed to find filesize? Try alternative way! */
-                getFilesizeViaAvailablecheckAlt(altbr, link);
+                getFilesizeViaAvailablecheckAlt(altbr, account, link);
             }
         }
         processFileInfo(fileInfo, altbr, link);
@@ -1307,11 +1331,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             }
             getPage(br, url);
         }
-        /* Special embed video offline check */
-        if (br.getRequest().getHtmlCode().equalsIgnoreCase("File was deleted")) {
-            /* Should be valid for all XFS hosts e.g. speedvideo.net, uqload.com */
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        } else if (isOffline(link, br)) {
+        if (isOffline(link, br)) {
             throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
         }
         this.checkErrors(br, br.getRequest().getHtmlCode(), link, account);
@@ -1476,9 +1496,6 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             }
         }
         this.checkErrors(br, url, link, account);
-        if (isOffline(link, br)) {
-            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
-        }
         final String dllink = getDllink(link, account, br, getCorrectBR(br));
         if (!StringUtils.isEmpty(dllink)) {
             this.videoStreamDownloadurl = dllink;
@@ -1644,9 +1661,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      */
     protected void resolveShortURL(final Browser br, final DownloadLink link, final Account account) throws Exception {
         synchronized (link) {
-            if (!supportsShortURLs()) {
-                return;
-            } else if (!isShortURL(link)) {
+            if (!isShortURL(link)) {
                 /* Do nothing */
                 return;
             }
@@ -1667,15 +1682,19 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
                 throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
             }
             URL_TYPE type = getURLType(br.getURL());
-            final String realFUID;
+            boolean obtainedLongFileIDFromURL = true;
+            String realFUID = null;
             if (type != null && !URL_TYPE.SHORT.equals(type)) {
                 logger.info("Type of current URL is not a short URL anymore -> Try to extract file_id from URL");
                 realFUID = getFUID(br.getURL(), type);
-            } else {
+            }
+            if (realFUID == null) {
+                /* Maybe redirect took us somewhere else -> Try to extract file_id from Form */
                 final Form form = br.getFormbyProperty("name", "F1");
                 final InputField id = form != null ? form.getInputFieldByName("id") : null;
                 realFUID = id != null ? id.getValue() : null;
                 type = URL_TYPE.NORMAL;
+                obtainedLongFileIDFromURL = false;
             }
             if (realFUID == null || !realFUID.matches("[A-Za-z0-9]{12}")) {
                 /* Failure */
@@ -1688,15 +1707,41 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
                 throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND, "realFUID:" + realFUID);
             }
             /* Success! */
+            final String mainPage;
             final String urlNew;
-            if (URL_TYPE.FILE.equals(type)) {
-                urlNew = URLHelper.parseLocation(new URL(this.getMainPage(link)), buildNormalFileURLPath(link, realFUID));
+            if (obtainedLongFileIDFromURL && this.canHandle(br.getURL())) {
+                /**
+                 * We know that the file_id is contained in our current URL, we know that the plugin can handle that URL (and the domain in
+                 * it) so we know that the current URL is the full URL to the file. The initial short-url will always redirect to this URL. <br>
+                 * We also know that the URL-type is a supported one so it doesn't matter which one it is.
+                 */
+                mainPage = getMainPage(br);
+                urlNew = br.getURL();
             } else {
-                urlNew = URLHelper.parseLocation(new URL(this.getMainPage(link)), buildNormalURLPath(link, realFUID));
+                if (isShortURLHostOnly(br, link)) {
+                    mainPage = buildMainPage(br._getURL(), null);
+                } else {
+                    mainPage = getMainPage(link);
+                }
+                if (URL_TYPE.FILE.equals(type)) {
+                    urlNew = URLHelper.parseLocation(new URL(mainPage), buildNormalFileURLPath(link, realFUID));
+                } else {
+                    urlNew = URLHelper.parseLocation(new URL(mainPage), buildNormalURLPath(link, realFUID));
+                }
             }
             logger.info("resolve URL|old: " + contentURL + "|new:" + urlNew);
             link.setPluginPatternMatcher(urlNew);
         }
+    }
+
+    /** Returns true if it looks like the current browser host can only be used for short-urls. */
+    protected boolean isShortURLHostOnly(Browser br, DownloadLink link) {
+        final Request currentRequest = br.getRequest();
+        final Request root = currentRequest.getRedirectRoot();
+        if (root != null && !StringUtils.equalsIgnoreCase(Browser.getHost(currentRequest.getURL()), Browser.getHost(root.getURL()))) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -1914,8 +1959,8 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
     }
 
     /** Check single URL via mass-linkchecker. Throws PluginException if URL has been detected as offline. */
-    public AvailableStatus requestFileInformationWebsiteMassLinkcheckerSingle(final DownloadLink link) throws IOException, PluginException {
-        massLinkcheckerWebsite(new DownloadLink[] { link });
+    public AvailableStatus requestFileInformationWebsiteMassLinkcheckerSingle(final Browser br, final Account account, final DownloadLink link) throws IOException, PluginException {
+        massLinkcheckerWebsite(br, account, new DownloadLink[] { link });
         if (!link.isAvailabilityStatusChecked()) {
             return AvailableStatus.UNCHECKED;
         } else if (!link.isAvailable()) {
@@ -1970,7 +2015,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      * - The contentURLs contain a filename as a fallback e.g. https://host.tld/<fuid>/someFilename.png.html <br>
      * - If the normal way via website is blocked somehow e.g. 'site-verification' captcha <br>
      */
-    protected boolean massLinkcheckerWebsite(final DownloadLink[] urls) {
+    protected boolean massLinkcheckerWebsite(final Browser br, final Account account, final DownloadLink[] urls) {
         if (urls == null || urls.length == 0) {
             return false;
         }
@@ -1980,7 +2025,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
         final String checkTypeOld = "checkfiles";
         final String checkTypeNew = "check_files";
         final SubConfiguration cfg = this.getPluginConfig();
-        final Browser br = createNewBrowserInstance();
+
         this.prepBrowser(br, getMainPage(br));
         br.setCookiesExclusive(true);
         try {
@@ -1998,7 +2043,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
                      * ShortURLs need to be single-checked. <br>
                      * Skip them here so that this happens later.
                      */
-                    if (supportsShortURLs() && isShortURL(link)) {
+                    if (isShortURL(link)) {
                         continue;
                     }
                     links.add(link);
@@ -2232,17 +2277,16 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      * Wrapper for requestFileInformationWebsiteMassLinkcheckerSingle which contains a bit of extra log output <br>
      * Often used as fallback if e.g. only logged-in users can see filesize or filesize is not given in html code for whatever reason.<br>
      * Often needed for <b><u>IMAGEHOSTER</u>S</b>.<br>
-     * Important: Only call this if <b><u>supports_availablecheck_alt</u></b> is <b>true</b> (meaning omly try this if website supports
-     * it)!<br>
+     * Important: Only call this if <b><u>supports_availablecheck_alt</u></b> is <b>true</b> (meaning omly try this if website supports it)!<br>
      * Some older XFS versions AND videohosts have versions of this linkchecker which only return online/offline and NO FILESIZE!<br>
      * In case there is no filesize given, offline status will still be recognized! <br>
      *
      * @return isOnline
      * @throws IOException
      */
-    protected boolean getFilesizeViaAvailablecheckAlt(final Browser br, final DownloadLink link) throws PluginException, IOException {
+    protected boolean getFilesizeViaAvailablecheckAlt(final Browser br, final Account account, final DownloadLink link) throws PluginException, IOException {
         logger.info("Trying getFilesizeViaAvailablecheckAlt");
-        requestFileInformationWebsiteMassLinkcheckerSingle(link);
+        requestFileInformationWebsiteMassLinkcheckerSingle(br, account, link);
         if (link.isAvailabilityStatusChecked()) {
             logger.info("Successfully checked URL via website massLinkcheck | filesize: " + link.getView().getBytesTotal());
             return true;
@@ -2876,8 +2920,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
      * Admins may sometimes setup waittimes that are higher than the interactive captcha timeout so lets say they set up 180 seconds of
      * pre-download-waittime --> User solves captcha immediately --> Captcha-solution times out after 120 seconds --> User has to re-enter
      * it in browser (and it would fail in JD)! <br>
-     * If admins set it up in a way that users can solve the captcha via the waittime counts down, this failure may even happen via browser!
-     * <br>
+     * If admins set it up in a way that users can solve the captcha via the waittime counts down, this failure may even happen via browser! <br>
      * This is basically a workaround which avoids running into said timeout: Make sure that we wait less than 120 seconds after the user
      * has solved the captcha by waiting some of this time in beforehand.
      */
@@ -4299,6 +4342,8 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             throw new PluginException(LinkStatus.ERROR_TEMPORARILY_UNAVAILABLE, "Server error 'Expired download session'", 10 * 60 * 1000l);
         } else if (isServerUnderMaintenance(br)) {
             throw new PluginException(LinkStatus.ERROR_TEMPORARILY_UNAVAILABLE, "Server is under maintenance", 30 * 60 * 1000l);
+        } else if (isOffline(link, br)) {
+            throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
         }
         /* Host-type specific errors */
         /* Videohoster */
@@ -4838,8 +4883,7 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
     }
 
     /**
-     * Tries to find apikey on website which, if given, usually camn be found on /?op=my_account Example host which has 'API mod'
-     * installed:<br>
+     * Tries to find apikey on website which, if given, usually camn be found on /?op=my_account Example host which has 'API mod' installed:<br>
      * This will also try to get- and save the API host with protocol in case it differs from the plugins' main host (examples:
      * ddownload.co, vup.to). clicknupload.org <br>
      * apikey will usually be located here: "/?op=my_account" <br>
@@ -5052,8 +5096,8 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
                 /**
                  * kenfiles.com
                  *
-                 * >Traffic available
-                 * today</span><span><a href="https://kenfiles.com/contact" title="671Mb/50000Mb" data-toggle="tooltip">49329 Mb</a></span>
+                 * >Traffic available today</span><span><a href="https://kenfiles.com/contact" title="671Mb/50000Mb"
+                 * data-toggle="tooltip">49329 Mb</a></span>
                  */
                 final long used = parseSize(Size.TRAFFIC, trafficDetails[0]);
                 final long max = parseSize(Size.TRAFFIC, trafficDetails[1]);
@@ -5064,8 +5108,8 @@ public abstract class XFileSharingProBasic extends antiDDoSForHost implements Do
             /**
              * filejoker.net
              *
-             * >Traffic Available:</label> <div class="col-12 col-md-8 col-lg"> <div class="progress">
-             * <div class="progress-bar progress-bar-striped bg-success" role="progressbar" style="width:47.95%" aria-valuenow="47.95"
+             * >Traffic Available:</label> <div class="col-12 col-md-8 col-lg"> <div class="progress"> <div
+             * class="progress-bar progress-bar-striped bg-success" role="progressbar" style="width:47.95%" aria-valuenow="47.95"
              * aria-valuemin="0" aria-valuemax="100" title="47951 MB available">47.95%</div>
              */
             availabletraffic = new Regex(formGroup, "title\\s*=\\s*\"\\s*([\\-\\s*]*[0-9\\.]+\\s*[TGMB]+\\s*)(?:available)?\"").getMatch(0);

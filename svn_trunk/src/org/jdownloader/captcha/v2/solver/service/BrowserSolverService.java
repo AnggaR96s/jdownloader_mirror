@@ -1,34 +1,32 @@
 package org.jdownloader.captcha.v2.solver.service;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.Icon;
 
 import org.appwork.storage.config.JsonConfig;
 import org.appwork.utils.os.CrossSystem;
-import org.jdownloader.captcha.v2.solver.browser.BrowserCaptchaSolverConfig;
-import org.jdownloader.captcha.v2.solver.cheapcaptcha.CheapCaptchaSolverService;
-import org.jdownloader.captcha.v2.solver.dbc.DeathByCaptchaSolverService;
-import org.jdownloader.captcha.v2.solver.endcaptcha.EndCaptchaSolverService;
-import org.jdownloader.captcha.v2.solver.imagetyperz.ImageTyperzSolverService;
-import org.jdownloader.captcha.v2.solver.jac.JacSolverService;
-import org.jdownloader.captcha.v2.solver.solver9kw.NineKwSolverService;
+import org.jdownloader.captcha.v2.ChallengeSolver.SolverType;
+import org.jdownloader.captcha.v2.solver.browser.BrowserCaptchaSolverConfigV3;
+import org.jdownloader.controlling.browser.ExternalBrowserManager;
 import org.jdownloader.gui.IconKey;
 import org.jdownloader.gui.translate._GUI;
 import org.jdownloader.images.NewTheme;
 import org.jdownloader.settings.staticreferences.CFG_GENERAL;
 
-import jd.gui.swing.jdgui.views.settings.panels.anticaptcha.AbstractCaptchaSolverConfigPanel;
+import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 
 public class BrowserSolverService extends AbstractSolverService {
-    public static final String                ID       = "browser";
-    private static final BrowserSolverService INSTANCE = new BrowserSolverService();
-    private static BrowserCaptchaSolverConfig config;
+    public static final String                  ID       = "browser";
+    private static final BrowserSolverService   INSTANCE = new BrowserSolverService();
+    private static BrowserCaptchaSolverConfigV3 config;
 
     public static BrowserSolverService getInstance() {
         if (config == null) {
-            config = JsonConfig.create(BrowserCaptchaSolverConfig.class);
+            config = JsonConfig.create(BrowserCaptchaSolverConfigV3.class);
         }
         return INSTANCE;
     }
@@ -42,79 +40,136 @@ public class BrowserSolverService extends AbstractSolverService {
     }
 
     @Override
-    public String getType() {
-        return _GUI.T.BrowserSolverService_getName();
+    public SolverType getType() {
+        return SolverType.JD_LOCAL_BROWSER;
     }
 
     @Override
     public Icon getIcon(int size) {
-        return NewTheme.I().getIcon(IconKey.ICON_OCR, size);
+        return NewTheme.I().getIcon(IconKey.ICON_BROWSE, size);
     }
 
     @Override
     public String getName() {
-        return _GUI.T.BrowserSolverService_gettypeName();
+        return "Dialog in Browser (Chrome, Firefox, Edge)";
     }
 
     @Override
-    public AbstractCaptchaSolverConfigPanel getConfigPanel() {
-        AbstractCaptchaSolverConfigPanel ret = new AbstractCaptchaSolverConfigPanel() {
-            {
-                addHeader(getTitle(), BrowserSolverService.this.getIcon(32));
-                addDescription(BrowserSolverService.this.getType());
-                addBlackWhiteList(config);
-            }
+    public String getDescription() {
+        return "Manual local captcha solving in your own browser. Requires our MyJDownloader browser extension. Does NOT require a MyJDownloader account!";
+    }
 
-            @Override
-            public Icon getIcon() {
-                return BrowserSolverService.this.getIcon(32);
-            }
+    /**
+     * Not ready if the system cannot open URLs (no OS default browser and no usable browser command line, see BrowserSolver#enqueue) or if
+     * the configured browser executable does not exist.
+     */
+    @Override
+    public boolean isReady() {
+        return isOpenBrowserSupported() && getMissingBrowserPath() == null;
+    }
 
-            @Override
-            public String getPanelID() {
-                return "JAC_" + getTitle();
+    /**
+     * Returns the executable path of the configured browser if it is an explicit path (contains a directory part) that does not exist,
+     * else null. A plain command name like "firefox" is resolved via PATH and therefore never reported.
+     */
+    private String getMissingBrowserPath() {
+        final String[] commandline = getConfig().getBrowserCommandline();
+        if (commandline == null) {
+            return null;
+        }
+        for (final String arg : commandline) {
+            if (arg != null && arg.trim().length() > 0) {
+                final String path = arg.trim();
+                if (path.indexOf('/') < 0 && path.indexOf('\\') < 0) {
+                    return null;
+                }
+                /* Avoid file system access on every call: the result is cached per path. */
+                final CheckedPath cached = checkedPath.get();
+                if (cached != null && cached.path.equals(path)) {
+                    return cached.missing ? path : null;
+                }
+                final boolean missing = !new File(path).exists();
+                checkedPath.set(new CheckedPath(path, missing));
+                return missing ? path : null;
             }
+        }
+        return null;
+    }
 
-            @Override
-            public String getTitle() {
-                return BrowserSolverService.this.getName();
-            }
+    /**
+     * Forgets the cached existence check of the configured browser path, so it is checked again on next access. Call this after a new
+     * browser path has been set.
+     */
+    public void resetBrowserPathCache() {
+        checkedPath.set(null);
+    }
 
-            @Override
-            public void save() {
-            }
+    private static final class CheckedPath {
+        private final String  path;
+        private final boolean missing;
 
-            @Override
-            public void updateContents() {
-            }
-        };
-        return ret;
+        private CheckedPath(final String path, final boolean missing) {
+            this.path = path;
+            this.missing = missing;
+        }
+    }
+
+    private final AtomicReference<CheckedPath> checkedPath = new AtomicReference<CheckedPath>();
+
+    /** The "Not ready" and "Browser not found" status texts are shown as a warning, see {@link #getStatusText()}. */
+    @Override
+    public boolean isStatusTextWarning() {
+        return !isReady();
     }
 
     @Override
-    public boolean hasConfigPanel() {
-        return true;
+    public String getStatusText() {
+        if (!isOpenBrowserSupported()) {
+            return _GUI.T.BrowserSolverService_status_notReady_openUrlsUnsupported();
+        }
+        final String missingPath = getMissingBrowserPath();
+        if (missingPath != null) {
+            return _GUI.T.BrowserSolverService_status_browserNotFound(missingPath);
+        }
+        final String[] commandline = getConfig().getBrowserCommandline();
+        if (commandline != null && commandline.length > 0) {
+            final String browserName = ExternalBrowserManager.getInstance().getLazyBrowserName(commandline);
+            if (browserName != null) {
+                return "Ready | using " + browserName;
+            }
+            return "Ready | using custom browser";
+        }
+        return "Ready | using OS default browser";
     }
 
     @Override
-    public BrowserCaptchaSolverConfig getConfig() {
-        return JsonConfig.create(BrowserCaptchaSolverConfig.class);
+    public List<CAPTCHA_TYPE> getSupportedCaptchaTypes() {
+        final List<CAPTCHA_TYPE> types = new ArrayList<CAPTCHA_TYPE>();
+        types.add(CAPTCHA_TYPE.HCAPTCHA);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V3);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V3_ENTERPRISE);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V2_INVISIBLE);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V2_ENTERPRISE);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V2);
+        return types;
+    }
+
+    /** Typed config accessor used by the browser solver subsystem. */
+    public BrowserCaptchaSolverConfigV3 getConfig() {
+        if (config == null) {
+            config = JsonConfig.create(BrowserCaptchaSolverConfigV3.class);
+        }
+        return config;
     }
 
     @Override
-    public Map<String, Integer> getWaitForOthersDefaultMap() {
-        HashMap<String, Integer> ret = new HashMap<String, Integer>();
-        // ret.put(DialogClickCaptchaSolver.ID, 0);
-        // ret.put(DialogBasicCaptchaSolver.ID, 0);
-        // ret.put(CaptchaAPISolver.ID, 0);
-        ret.put(JacSolverService.ID, 30000);
-        ret.put(NineKwSolverService.ID, 300000);
-        // ret.put(CaptchaMyJDSolverService.ID, 60000);
-        ret.put(DeathByCaptchaSolverService.ID, 60000);
-        ret.put(ImageTyperzSolverService.ID, 60000);
-        ret.put(CheapCaptchaSolverService.ID, 60000);
-        ret.put(EndCaptchaSolverService.ID, 60000);
-        return ret;
+    public BrowserCaptchaSolverConfigV3 getConfigV3() {
+        return getConfig();
+    }
+
+    @Override
+    public String getHelpArticleURL() {
+        return "https://support.jdownloader.org/de/knowledgebase/article/jd-opens-my-browser-to-display-captchas";
     }
 
     @Override

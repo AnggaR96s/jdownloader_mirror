@@ -3,7 +3,7 @@ package org.jdownloader.settings.staticreferences;
 import org.appwork.storage.config.JsonConfig;
 import org.appwork.storage.config.handler.BooleanKeyHandler;
 import org.appwork.storage.config.handler.EnumKeyHandler;
-import org.appwork.storage.config.handler.EnumListHandler;
+import org.appwork.storage.config.handler.EnumArrayKeyHandler;
 import org.appwork.storage.config.handler.IntegerKeyHandler;
 import org.appwork.storage.config.handler.LongKeyHandler;
 import org.appwork.storage.config.handler.ObjectKeyHandler;
@@ -66,9 +66,13 @@ public class CFG_GENERAL {
     // **/
     // public static final BooleanKeyHandler JX_BROWSER_ENABLED = SH.getKeyHandler("JxBrowserEnabled", BooleanKeyHandler.class);
     /**
-     * Use available Accounts?
+     * Use available accounts for downloading?
      **/
     public static final BooleanKeyHandler               USE_AVAILABLE_ACCOUNTS                                           = SH.getKeyHandler("UseAvailableAccounts", BooleanKeyHandler.class);
+    /**
+     * Use available accounts for external captcha solver services (excludes local solvers and the MyJDownloader remote solver)?
+     **/
+    public static final BooleanKeyHandler               USE_AVAILABLE_CAPTCHA_SOLVER_ACCOUNTS                            = SH.getKeyHandler("UseAvailableCaptchaSolverAccounts", BooleanKeyHandler.class);
     /**
      * How many history entries will be kept in the download links
      **/
@@ -212,7 +216,7 @@ public class CFG_GENERAL {
      * If >0, JD will start additional downloads when total speed is below this value
      **/
     public static final IntegerKeyHandler               AUTO_MAX_DOWNLOADS_SPEED_LIMIT                                   = SH.getKeyHandler("AutoMaxDownloadsSpeedLimit", IntegerKeyHandler.class);
-    public static final EnumListHandler                 URL_DISPLAY_ORDER                                                = SH.getKeyHandler("UrlDisplayOrder", EnumListHandler.class);
+    public static final EnumArrayKeyHandler                 URL_DISPLAY_ORDER                                                = SH.getKeyHandler("UrlDisplayOrder", EnumArrayKeyHandler.class);
     /**
      * @see AutoStartCountdownSeconds
      **/

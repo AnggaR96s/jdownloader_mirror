@@ -18,8 +18,6 @@ package jd.plugins.hoster;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.jdownloader.plugins.components.YetiShareCore;
-
 import jd.PluginWrapper;
 import jd.http.Browser;
 import jd.plugins.Account;
@@ -27,7 +25,9 @@ import jd.plugins.Account.AccountType;
 import jd.plugins.DownloadLink;
 import jd.plugins.HostPlugin;
 
-@HostPlugin(revision = "$Revision: 53028 $", interfaceVersion = 2, names = {}, urls = {})
+import org.jdownloader.plugins.components.YetiShareCore;
+
+@HostPlugin(revision = "$Revision: 53520 $", interfaceVersion = 2, names = {}, urls = {})
 public class LoadedfilesOrg extends YetiShareCore {
     public LoadedfilesOrg(PluginWrapper wrapper) {
         super(wrapper);

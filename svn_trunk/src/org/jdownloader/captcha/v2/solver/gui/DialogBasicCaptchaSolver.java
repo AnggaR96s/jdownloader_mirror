@@ -1,5 +1,8 @@
 package org.jdownloader.captcha.v2.solver.gui;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.appwork.storage.config.JsonConfig;
 import org.jdownloader.captcha.v2.AbstractResponse;
 import org.jdownloader.captcha.v2.Challenge;
@@ -7,6 +10,7 @@ import org.jdownloader.captcha.v2.ChallengeSolver;
 import org.jdownloader.captcha.v2.challenge.stringcaptcha.BasicCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.stringcaptcha.CaptchaResponse;
 import org.jdownloader.captcha.v2.solver.jac.JACSolver;
+import org.jdownloader.captcha.v2.solver.service.DialogSolverService;
 import org.jdownloader.captcha.v2.solverjob.ChallengeSolverJobListener;
 import org.jdownloader.captcha.v2.solverjob.ResponseList;
 import org.jdownloader.captcha.v2.solverjob.SolverJob;
@@ -15,6 +19,7 @@ import org.jdownloader.settings.advanced.AdvancedConfigManager;
 import jd.controlling.captcha.BasicCaptchaDialogHandler;
 import jd.controlling.captcha.CaptchaSettings;
 import jd.controlling.captcha.SkipException;
+import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 
 public class DialogBasicCaptchaSolver extends AbstractDialogSolver<String> {
     private CaptchaSettings                       config;
@@ -33,6 +38,13 @@ public class DialogBasicCaptchaSolver extends AbstractDialogSolver<String> {
     }
 
     @Override
+    public List<CAPTCHA_TYPE> getSupportedCaptchaTypes() {
+        final List<CAPTCHA_TYPE> types = new ArrayList<CAPTCHA_TYPE>();
+        types.add(CAPTCHA_TYPE.IMAGE);
+        return types;
+    }
+
+    @Override
     public ChallengeVetoReason getChallengeVetoReason(Challenge<?> c) {
         if (c instanceof BasicCaptchaChallenge) {
             /* Looks good -> Let upper handling decide for VetoReason */
@@ -45,7 +57,7 @@ public class DialogBasicCaptchaSolver extends AbstractDialogSolver<String> {
     private DialogBasicCaptchaSolver() {
         super(1);
         config = JsonConfig.create(CaptchaSettings.class);
-        AdvancedConfigManager.getInstance().register(JsonConfig.create(DialogCaptchaSolverConfig.class));
+        AdvancedConfigManager.getInstance().register(DialogSolverService.getInstance().getConfigV3());
     }
 
     @Override

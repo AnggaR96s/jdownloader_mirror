@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -92,7 +93,7 @@ public class AccountTooltip extends PanelToolTip {
         if (account_collection_is_multi) {
             txt = _GUI.T.AccountTooltip_AccountTooltip_multi(accountCollection.getDomainInfo().getTld());
         } else if (account_collection_is_captcha_solver) {
-            txt = accountCollection.getDomainInfo().getTld() + " (Captcha Solver)";
+            txt = _GUI.T.AccountTooltip_AccountTooltip_captchasolver(accountCollection.getDomainInfo().getTld());
         }
         JLabel label = new JLabel(txt, accountCollection.getDomainInfo().getFavIcon(), JLabel.LEFT);
         SwingUtils.toBold(label);
@@ -135,7 +136,8 @@ public class AccountTooltip extends PanelToolTip {
             SwingUtils.toBold(label);
             label.setForeground(LAFOptions.getInstance().getColorForTooltipForeground());
             panel.add(label);
-            List<CAPTCHA_TYPE> captchatypes = new ArrayList<CAPTCHA_TYPE>();
+            /* LinkedHashSet: each type only once even with multiple accounts of the same solver, insertion order is kept. */
+            final LinkedHashSet<CAPTCHA_TYPE> captchatypes = new LinkedHashSet<CAPTCHA_TYPE>();
             for (final Account account : accountCollection) {
                 final PluginForHost plg = account.getPlugin();
                 if (plg == null) {

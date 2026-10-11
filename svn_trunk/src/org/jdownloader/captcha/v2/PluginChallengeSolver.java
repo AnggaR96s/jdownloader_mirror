@@ -1,5 +1,6 @@
 package org.jdownloader.captcha.v2;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.jdownloader.captcha.v2.solver.CESSolverJob;
@@ -7,10 +8,12 @@ import org.jdownloader.captcha.v2.solver.jac.SolverException;
 import org.jdownloader.captcha.v2.solverjob.SolverJob;
 import org.jdownloader.plugins.components.captchasolver.PluginForCaptchaSolverSolverService;
 import org.jdownloader.plugins.components.captchasolver.abstractPluginForCaptchaSolver;
+import org.jdownloader.plugins.components.config.CaptchaSolverPluginConfig;
 
 import jd.controlling.captcha.SkipException;
 import jd.plugins.Account;
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
+import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 
 /**
@@ -28,7 +31,7 @@ public class PluginChallengeSolver<T> extends ChallengeSolver<T> {
         final ChallengeResponseController crp = ChallengeResponseController.getInstance();
         SolverService svs = ChallengeResponseController.getInstance().getServiceByID(plugin.getHost());
         if (svs == null) {
-            // TODO: Check if this is necessary
+            /* Plugin appeared/updated after ChallengeResponseController's one-time startup scan (e.g. hot-loaded, no restart yet). */
             svs = new PluginForCaptchaSolverSolverService(plugin);
             crp.addSolverService(svs);
         }
@@ -39,16 +42,85 @@ public class PluginChallengeSolver<T> extends ChallengeSolver<T> {
 
     @Override
     public boolean isEnabled() {
-        return this.service.isEnabled() && this.account.isEnabled();
+        return this.service.getConfigV3().isEnabled() && this.account.isEnabled();
+    }
+
+    /**
+     * Combines the user's configured max polling time (if enabled) with the solver service's own server-side limit
+     * ({@link abstractPluginForCaptchaSolver#getServerSideMaxPollingTimeoutMillis()}), whichever is smaller. Both of those return
+     * {@link Long#MAX_VALUE} for "no limit"; that value must never reach {@link JobRunnable}'s
+     * {@link org.appwork.scheduler.DelayedRunnable} as a real delay (huge millisecond delays risk overflow in the underlying scheduler), so
+     * it is translated back to this class' own "no timeout" sentinel, -1, same as the default {@link ChallengeSolver#getTimeoutMillis()}.
+     */
+    @Override
+    public long getTimeoutMillis() {
+        final CaptchaSolverConfigV3 cfg = service.getConfigV3();
+        final long configured = cfg.isMaxPollingTimeoutEnabled() ? cfg.getMaxPollingTimeoutSeconds() * 1000L : Long.MAX_VALUE;
+        final long serverSide = plugin.getServerSideMaxPollingTimeoutMillis();
+        final long combined = Math.min(configured, serverSide);
+        if (combined == Long.MAX_VALUE) {
+            return -1;
+        }
+        return Math.max(1L, combined);
+    }
+
+    /**
+     * The user's configured max simultaneous captchas limit (if enabled), but always at least 1. It is the user's limit for this solver as
+     * a whole, i.e. it applies to all accounts of the solver service together (the per-account server-side limit is handled separately by
+     * {@link #getFinalMaxCaptchaThreadsPerAccount()}).
+     */
+    @Override
+    public final int getFinalMaxCaptchaThreads() {
+        final CaptchaSolverConfigV3 cfg = service.getConfigV3();
+        final int configured = cfg.isLimitMaxSimultaneousCaptchasEnabled() ? cfg.getMaxSimultaneousCaptchas() : Integer.MAX_VALUE;
+        return Math.max(1, configured);
+    }
+
+    /**
+     * The solver service's own server-side limit for this solver's account
+     * ({@link abstractPluginForCaptchaSolver#getServerSideMaxSimultaneousCaptchaThreadsLimit(Account)}), but always at least 1. It applies
+     * to every account on its own, so a second account of the same solver service has its own, independent budget.
+     */
+    @Override
+    public final int getFinalMaxCaptchaThreadsPerAccount() {
+        return Math.max(1, plugin.getServerSideMaxSimultaneousCaptchaThreadsLimit(account));
+    }
+
+    /**
+     * The enabled custom limit rules of this solver (they apply to the solver as a whole, i.e. to all of its accounts together), or null if
+     * the user has not switched custom limits on or no rule is enabled. The rule list in the config is the very list the settings table
+     * edits, so it is copied here (as a snapshot) before it gets iterated.
+     */
+    @Override
+    public List<CaptchaSolverLimitRule> getCustomLimitRules() {
+        final CaptchaSolverPluginConfig cfg = ((PluginForCaptchaSolverSolverService) service).getPluginConfig();
+        if (!cfg.isCustomLimitsEnabled()) {
+            return null;
+        }
+        final ArrayList<CaptchaSolverLimitRule> stored = cfg.getLimitRules();
+        if (stored == null) {
+            return null;
+        }
+        final List<CaptchaSolverLimitRule> ret = new ArrayList<CaptchaSolverLimitRule>();
+        for (final CaptchaSolverLimitRule rule : stored.toArray(new CaptchaSolverLimitRule[0])) {
+            if (rule.isEnabled()) {
+                ret.add(rule);
+            }
+        }
+        return ret.isEmpty() ? null : ret;
+    }
+
+    /*
+     * Distinguishes the various per-account/per-plugin instances of this solver in log output (otherwise they all just print
+     * "PluginChallengeSolver", see ChallengeSolver#toString()).
+     */
+    @Override
+    public String toString() {
+        return super.toString() + "@" + plugin.getHost();
     }
 
     public Account getAccount() {
         return account;
-    }
-
-    @Override
-    public SolverType getSolverType() {
-        return SolverType.EXTERNAL;
     }
 
     @Override
@@ -88,17 +160,18 @@ public class PluginChallengeSolver<T> extends ChallengeSolver<T> {
         if (ctype != null && all_supported_captcha_types != null && account_supported_captcha_types != null && all_supported_captcha_types.contains(ctype) && !account_supported_captcha_types.contains(ctype)) {
             return ChallengeVetoReason.UNSUPPORTED_BY_SOLVER_ACCOUNT;
         }
-        return super.getChallengeVetoReason(c);
-    }
-
-    @Override
-    public boolean isFilterListEnabled() {
-        return plugin.isFilterListEnabled();
-    }
-
-    @Override
-    public List<CaptchaChallengeFilter> getCaptchaChallengeFilterList() {
-        return this.plugin.getCaptchaChallengeFilterList();
+        final ChallengeVetoReason superVeto = super.getChallengeVetoReason(c);
+        if (superVeto != null) {
+            return superVeto;
+        }
+        /*
+         * Checked last: this solver could solve the challenge, so the only reason left not to use it is that it would exceed one of the
+         * user's custom limits (and the check logs which one, which is only interesting for challenges the solver is eligible for).
+         */
+        if (ChallengeResponseController.getInstance().isCustomLimitReached(this)) {
+            return ChallengeVetoReason.CUSTOM_LIMIT_REACHED;
+        }
+        return null;
     }
 
     @Override
@@ -163,13 +236,22 @@ public class PluginChallengeSolver<T> extends ChallengeSolver<T> {
 
     @Override
     public void solve(SolverJob<T> job) throws InterruptedException, SolverException, SkipException {
-        final CESSolverJob<T> cesJob = new CESSolverJob<T>(job);
+        final CESSolverJob<T> cesJob = new CESSolverJob<T>(job, this);
         try {
+            cesJob.showBubble();
             plugin.setCurrentCaptchaChallenge(job.getChallenge());
             plugin.solve(cesJob, account);
         } catch (final PluginException e) {
             // TODO: Set detailed failure feedback on SolverJob e.g. if failure was account related.
-            plugin.handleAccountException(account, plugin.getLogger(), e);
+            if (e.getLinkStatus() == LinkStatus.ERROR_CAPTCHA) {
+                /*
+                 * Captcha could not be solved (e.g. unsolvable captcha). This is a problem of the captcha itself and not of the account ->
+                 * Only log it and do not set an account error.
+                 */
+                plugin.getLogger().log(e);
+            } else {
+                plugin.handleAccountException(account, plugin.getLogger(), e);
+            }
         } catch (Exception e) {
             // TODO
             e.printStackTrace();

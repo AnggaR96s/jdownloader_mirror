@@ -21,6 +21,7 @@ import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -32,27 +33,6 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.TimeUnit;
-
-import jd.controlling.accountchecker.AccountChecker;
-import jd.controlling.accountchecker.AccountCheckerThread;
-import jd.controlling.downloadcontroller.SingleDownloadController;
-import jd.gui.swing.jdgui.JDGui;
-import jd.gui.swing.jdgui.WarnLevel;
-import jd.http.Browser;
-import jd.http.BrowserSettingsThread;
-import jd.nutils.encoding.Encoding;
-import jd.plugins.Account;
-import jd.plugins.Account.AccountError;
-import jd.plugins.Account.AccountPropertyChangeHandler;
-import jd.plugins.Account.AccountType;
-import jd.plugins.AccountInfo;
-import jd.plugins.AccountProperty;
-import jd.plugins.AccountUnavailableException;
-import jd.plugins.MultiHostHost;
-import jd.plugins.MultiHostHost.MultihosterHostStatus;
-import jd.plugins.Plugin;
-import jd.plugins.Plugin.PluginEnvironment;
-import jd.plugins.PluginForHost;
 
 import org.appwork.scheduler.DelayedRunnable;
 import org.appwork.shutdown.ShutdownController;
@@ -75,9 +55,11 @@ import org.appwork.utils.swing.dialog.Dialog;
 import org.appwork.utils.swing.dialog.DialogCanceledException;
 import org.appwork.utils.swing.dialog.DialogClosedException;
 import org.jdownloader.gui.IconKey;
+import org.jdownloader.gui.notify.captcha.LowCaptchaCreditsBubbleSupport;
 import org.jdownloader.gui.translate._GUI;
 import org.jdownloader.images.AbstractIcon;
 import org.jdownloader.logging.LogController;
+import org.jdownloader.plugins.components.captchasolver.abstractPluginForCaptchaSolver;
 import org.jdownloader.plugins.controller.LazyPlugin.FEATURE;
 import org.jdownloader.plugins.controller.PluginClassLoader;
 import org.jdownloader.plugins.controller.PluginClassLoader.PluginClassLoaderChild;
@@ -87,6 +69,28 @@ import org.jdownloader.plugins.controller.host.PluginFinder;
 import org.jdownloader.settings.AccountData;
 import org.jdownloader.settings.AccountSettings;
 
+import jd.controlling.accountchecker.AccountChecker;
+import jd.controlling.accountchecker.AccountCheckerThread;
+import jd.controlling.downloadcontroller.AccountCache.CachedAccount;
+import jd.controlling.downloadcontroller.SingleDownloadController;
+import jd.gui.swing.jdgui.JDGui;
+import jd.gui.swing.jdgui.WarnLevel;
+import jd.http.Browser;
+import jd.http.BrowserSettingsThread;
+import jd.nutils.encoding.Encoding;
+import jd.plugins.Account;
+import jd.plugins.Account.AccountError;
+import jd.plugins.Account.AccountPropertyChangeHandler;
+import jd.plugins.Account.AccountType;
+import jd.plugins.AccountInfo;
+import jd.plugins.AccountProperty;
+import jd.plugins.AccountUnavailableException;
+import jd.plugins.MultiHostHost;
+import jd.plugins.MultiHostHost.MultihosterHostStatus;
+import jd.plugins.Plugin;
+import jd.plugins.Plugin.PluginEnvironment;
+import jd.plugins.PluginForHost;
+
 public class AccountController implements AccountControllerListener, AccountPropertyChangeHandler {
     private static final long                                                    serialVersionUID = -7560087582989096645L;
     private final HashMap<String, List<Account>>                                 ACCOUNTS;
@@ -94,11 +98,11 @@ public class AccountController implements AccountControllerListener, AccountProp
     private final HashMap<String, Map<Account, Object>>                          MULTIHOSTER_ACCOUNTS;
     private static AccountController                                             INSTANCE         = new AccountController();
     private final Eventsender<AccountControllerListener, AccountControllerEvent> broadcaster      = new Eventsender<AccountControllerListener, AccountControllerEvent>() {
-        @Override
-        protected void fireEvent(final AccountControllerListener listener, final AccountControllerEvent event) {
-            listener.onAccountControllerEvent(event);
-        }
-    };
+                                                                                                      @Override
+                                                                                                      protected void fireEvent(final AccountControllerListener listener, final AccountControllerEvent event) {
+                                                                                                          listener.onAccountControllerEvent(event);
+                                                                                                      }
+                                                                                                  };
 
     public Eventsender<AccountControllerListener, AccountControllerEvent> getEventSender() {
         return broadcaster;
@@ -259,10 +263,6 @@ public class AccountController implements AccountControllerListener, AccountProp
             return ai;
         }
         final AccountError errorBefore = account.getError();
-        double balanceBefore = -1;
-        if (ai != null) {
-            balanceBefore = ai.getAccountBalance();
-        }
         PluginForHost plugin = null;
         final HashMap<AccountProperty.Property, AccountProperty> propertyChanges = new HashMap<AccountProperty.Property, AccountProperty>();
         try {
@@ -346,10 +346,16 @@ public class AccountController implements AccountControllerListener, AccountProp
                     ai.setExpired(false);
                 }
                 long tempDisabledCounterBefore = account.getTmpDisabledTimeout();
+                boolean pluginSetStatus = false;
                 try {
                     plugin.validateLogins(account);
                     ai = plugin.fetchAccountInfo(account);
                     plugin.validateLastChallengeResponse();
+                    /*
+                     * Must be checked before Account#setAccountInfo: it sets a default status text (e.g. "Premium Account") if there is
+                     * none, so afterwards it can no longer be told whether the plugin set a status itself.
+                     */
+                    pluginSetStatus = ai != null && StringUtils.isNotEmpty(ai.getStatus());
                     account.setAccountInfo(ai);
                 } finally {
                     account.setUpdateTime(System.currentTimeMillis());
@@ -361,16 +367,7 @@ public class AccountController implements AccountControllerListener, AccountProp
                     return ai;
                 }
                 if (plugin.hasFeature(FEATURE.CAPTCHA_SOLVER)) {
-                    // TODO: This overwrites any status text set in plugins -> Fix this
-                    ai.setStatus("Balance: " + ai.getAccountBalanceFormatted());
-                    if (ai.getAccountBalance() <= 0) {
-                        account.setError(AccountError.INVALID, -1, "Zero balance");
-                    }
-                    /* Warn on low balance */
-                    final double lowBalanceThreshold = 1.0;
-                    if (balanceBefore >= lowBalanceThreshold && ai.getAccountBalance() < lowBalanceThreshold) {
-                        // TODO: Display notification on low balance
-                    }
+                    handleCaptchaSolverAccountSpecificStuff(plugin, account, ai, pluginSetStatus, logger);
                 }
                 /* Account check was successful. Account can still get an error status down below if it is expired or out of traffic. */
                 account.setLastValidTimestamp(System.currentTimeMillis());
@@ -435,6 +432,53 @@ public class AccountController implements AccountControllerListener, AccountProp
                     getEventSender().fireEvent(new AccountPropertyChangedEvent(latestChangeEvent.getAccount(), latestChangeEvent));
                 }
             }
+        }
+    }
+
+    /*
+     * Captcha solver accounts for which the user clicked "Hide this session" in the low credits bubble. Deliberately kept in RAM only (no
+     * account property, not persisted): after a restart the user is warned again if the credits are still low. Weak keys, so removed
+     * accounts do not leak.
+     */
+    private final Set<Account> lowCreditsSuppressedAccounts = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<Account, Boolean>()));
+    /** Stops the low credits bubble for the given account until JDownloader is restarted. */
+    public void suppressLowCreditsBubble(final Account account) {
+        lowCreditsSuppressedAccounts.add(account);
+    }
+
+    /**
+     * Captcha solver specific part of the account check: default status text, zero balance error and low balance warning. If the balance
+     * is below the user's warning threshold, a notification is shown after every account check, unless the user suppressed it for this
+     * account (see {@link #suppressLowCreditsBubble(Account)}).
+     *
+     * @param pluginSetStatus
+     *            True if the plugin set a status text itself (it is kept then, otherwise a default "Balance: ..." status is set)
+     */
+    private void handleCaptchaSolverAccountSpecificStuff(final PluginForHost plugin, final Account account, final AccountInfo ai, final boolean pluginSetStatus, final LogInterface logger) {
+        if (!(plugin instanceof abstractPluginForCaptchaSolver)) {
+            /* Has the captcha solver feature but is not based on abstractPluginForCaptchaSolver -> no low credits settings available. */
+            logger.warning("Plugin " + plugin.getHost() + " (" + plugin.getClass().getName() + ") has the captcha solver feature but is not an instance of abstractPluginForCaptchaSolver -> Cannot check for low credits");
+            return;
+        }
+        if (!pluginSetStatus) {
+            /* Default status text. Plugins which set their own status text (e.g. with additional info) keep it. */
+            ai.setStatus(_GUI.T.CaptchaSolverAccount_balance(ai.getAccountBalanceFormatted()));
+        }
+        if (ai.getAccountBalance() <= 0) {
+            account.setError(AccountError.INVALID, -1, "Zero balance");
+            /**
+             * Balance is already zero so no need to check for low credits warning below. <br>
+             * The warning exists to warn the user before the balance goes to zero so we can assume that that warning has already happened.
+             */
+            return;
+        }
+        /* Low credits warning */
+        if (!account.isLowBalance()) {
+            return;
+        }
+        /* The low balance hint in the status text is not stored in the AccountInfo, see Account#getLowBalanceStatusSuffix(). */
+        if (!lowCreditsSuppressedAccounts.contains(account)) {
+            LowCaptchaCreditsBubbleSupport.getInstance().show(account, ai.getAccountBalanceFormatted(), account.getLowBalanceThresholdFormatted(), buildAfflink(plugin.getLazyP(), plugin, "captchasolver/lowcredits/bubble"));
         }
     }
 
@@ -957,15 +1001,17 @@ public class AccountController implements AccountControllerListener, AccountProp
         }
         final Thread currentThread = Thread.currentThread();
         if (currentThread instanceof SingleDownloadController) {
-            // requestFileInformation must use the account from DownloadLinkCandidate of SingleDownloadController
+            // plugins have to the account from DownloadLinkCandidate.getCachedAccount of current SingleDownloadController for matching host
             final SingleDownloadController controller = (SingleDownloadController) currentThread;
-            final Account acc = controller.getAccount();
-            if (acc == null) {
+            final CachedAccount cachedAccount = controller.getDownloadLinkCandidate().getCachedAccount();
+            if (host.equalsIgnoreCase(cachedAccount.getHost())) {
+                final Account acc = cachedAccount.getAccount();
+                if (acc != null && host.equalsIgnoreCase(acc.getHosterByPlugin())) {
+                    final ArrayList<Account> ret = new ArrayList<Account>();
+                    ret.add(acc);
+                    return ret;
+                }
                 return null;
-            } else if (StringUtils.equals(acc.getHosterByPlugin(), host)) {
-                final ArrayList<Account> ret = new ArrayList<Account>();
-                ret.add(acc);
-                return ret;
             }
         }
         final ArrayList<Account> ret = listAccounts(new AccountFilter(host).setEnabled(true).setValid(true).setTemporarilyDisabled(false));

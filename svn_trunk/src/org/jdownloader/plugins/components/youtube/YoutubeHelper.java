@@ -14,8 +14,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -119,6 +117,7 @@ import jd.http.requests.PostRequest;
 import jd.nutils.encoding.Encoding;
 import jd.parser.html.Form;
 import jd.plugins.Account;
+import jd.plugins.AccountRequiredException;
 import jd.plugins.DownloadLink;
 import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
@@ -175,7 +174,7 @@ public class YoutubeHelper {
     // public Map<String, YoutubeBasicVariant> getVariantsMap() {
     // return variantsMap;
     // }
-    private static final Map<String, YoutubeReplacer> REPLACER_MAP = new HashMap<String, YoutubeReplacer>();
+    private static final Map<String, YoutubeReplacer> REPLACER_MAP = new LinkedHashMap<String, YoutubeReplacer>();
     public static final List<YoutubeReplacer>         REPLACER     = new ArrayList<YoutubeReplacer>() {
                                                                        @Override
                                                                        public boolean add(final YoutubeReplacer e) {
@@ -1334,23 +1333,23 @@ public class YoutubeHelper {
         private String src;
     }
 
-    private Map<String, Object>      jsCache                 = new HashMap<String, Object>();
-    private HashSet<String>          subtitleUrls;
-    private HashSet<StreamMap>       fmtMaps;
-    private LinkedHashSet<StreamMap> mpdUrls;
-    private Account                  account;
-    private final boolean            hlsEnabled              = true;
-    private final boolean            dashMpdEnabled          = true;
-    private final boolean            adaptiveFmtsEnabled     = true;
-    private final boolean            fmtMapEnabled           = true;
-    private String                   html5PlayerJs;
-    private YoutubeClipData          vid;
-    private String                   playlistID              = null;
-    private Map<String, Object>      ytInitialData;
-    private Map<String, Object>      ytInitialPlayerResponse = null;
-    private Map<String, Object>      ytPlayerConfig;
-    private Map<String, Object>      ytCfgSet;
-    private List<YoutubeStreamData>  playlistThumbnails      = null;
+    private Map<String, Object>     jsCache                 = new LinkedHashMap<String, Object>();
+    private Set<String>             subtitleUrls;
+    private Set<StreamMap>          fmtMaps;
+    private Set<StreamMap>          mpdUrls;
+    private Account                 account;
+    private final boolean           hlsEnabled              = true;
+    private final boolean           dashMpdEnabled          = true;
+    private final boolean           adaptiveFmtsEnabled     = true;
+    private final boolean           fmtMapEnabled           = true;
+    private String                  html5PlayerJs;
+    private YoutubeClipData         vid;
+    private String                  playlistID              = null;
+    private Map<String, Object>     ytInitialData;
+    private Map<String, Object>     ytInitialPlayerResponse = null;
+    private Map<String, Object>     ytPlayerConfig;
+    private Map<String, Object>     ytCfgSet;
+    private List<YoutubeStreamData> playlistThumbnails      = null;
 
     /**
      * @return the ytInitialData
@@ -1468,7 +1467,7 @@ public class YoutubeHelper {
                     return trusted;
                 }
             };
-            final Map<String, String> additionalMap = new HashMap<String, String>();
+            final Map<String, String> additionalMap = new LinkedHashMap<String, String>();
             synchronized (jsCache) {
                 final Map<String, String> cachedAdditionalMap = (Map<String, String>) jsCache.get(functionCacheKey + "_additional");
                 if (cachedAdditionalMap != null) {
@@ -1497,7 +1496,7 @@ public class YoutubeHelper {
                             throw new Exception("Invalid result:" + result);
                         } else {
                             synchronized (jsCache) {
-                                jsCache.put(functionCacheKey + "_additional", new HashMap<String, String>(additionalMap));
+                                jsCache.put(functionCacheKey + "_additional", new LinkedHashMap<String, String>(additionalMap));
                                 jsCache.put(resultCacheKey, output);
                             }
                             break;
@@ -1696,7 +1695,7 @@ public class YoutubeHelper {
         throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
     }
 
-    private static final Map<String, String> PLAYERJS_CACHE = new HashMap<String, String>();
+    private static final Map<String, String> PLAYERJS_CACHE = new LinkedHashMap<String, String>();
 
     private String ensurePlayerSource() throws IOException {
         final String html5PlayerJs = this.html5PlayerJs;
@@ -1707,7 +1706,10 @@ public class YoutubeHelper {
         synchronized (PLAYERJS_CACHE) {
             String ret = PLAYERJS_CACHE.get(key);
             if (ret == null) {
-                ret = br.cloneBrowser().getPage(html5PlayerJs);
+                Browser brc = br.cloneBrowser();
+                brc.setDebug(true);
+                brc.setVerbose(false);
+                ret = brc.getPage(html5PlayerJs);
                 PLAYERJS_CACHE.put(key, ret);
             }
             return ret;
@@ -2398,12 +2400,12 @@ public class YoutubeHelper {
         return false;
     }
 
-    protected Map<String, List<YoutubeStreamData>> streamDataCache = new HashMap<String, List<YoutubeStreamData>>();
+    protected Map<String, List<YoutubeStreamData>> streamDataCache = new LinkedHashMap<String, List<YoutubeStreamData>>();
 
     public void refreshVideo(final YoutubeClipData vid) throws Exception {
         account = login(logger, false);
         this.vid = vid;
-        final Map<YoutubeITAG, StreamCollection> ret = new HashMap<YoutubeITAG, StreamCollection>();
+        final Map<YoutubeITAG, StreamCollection> ret = new LinkedHashMap<YoutubeITAG, StreamCollection>();
         final YoutubeConfig cfg = PluginJsonConfig.get(YoutubeConfig.class);
         br.setFollowRedirects(true);
         /* this cookie makes html5 available and skip controversy check */
@@ -2422,14 +2424,14 @@ public class YoutubeHelper {
         }
         vid.approxThreedLayout = br.getRegex("\"approx_threed_layout\"\\s*\\:\\s*\"([^\"]*)").getMatch(0);
         String[][] keyWordsGrid = br.getRegex("<meta\\s+property=\"([^\"]*)\"\\s+content=\"yt3d\\:([^\"]+)=([^\"]+)\">").getMatches();
-        vid.keywords3D = new HashMap<String, String>();
+        vid.keywords3D = new LinkedHashMap<String, String>();
         if (keyWordsGrid != null) {
             for (String[] keyValue : keyWordsGrid) {
                 vid.keywords3D.put(keyValue[1], keyValue[2]);
             }
         }
         String keywords = br.getRegex("<meta name=\"keywords\" content=\"([^\"]*)").getMatch(0);
-        vid.keywords = new HashSet<String>();
+        vid.keywords = new LinkedHashSet<String>();
         if (keywords != null) {
             for (String s : keywords.split("[,]+")) {
                 vid.keywords.add(s);
@@ -2454,8 +2456,12 @@ public class YoutubeHelper {
         this.handleContentWarning(br);
         int collected = 0;
         if (isAPIPrefered(br) || vid.ageCheck) {
-            collected = collectMapsFromAPIResponse(br);
-            logger.info("found collectMapsFromAPIResponse(" + vid.videoID + "):" + collected);
+            try {
+                collected = collectMapsFromAPIResponse(br);
+                logger.info("found collectMapsFromAPIResponse(" + vid.videoID + "):" + collected);
+            } catch (AccountRequiredException e) {
+                logger.log(e);
+            }
         }
         if (collected <= 0) {
             collected = collectMapsFromPlayerResponse(map, br.getURL());
@@ -2783,7 +2789,7 @@ public class YoutubeHelper {
         return request;
     }
 
-    protected int collectMapsFromAPIResponse(Browser br) throws InterruptedException, Exception {
+    protected int collectMapsFromAPIResponse(Browser br) throws InterruptedException, Exception, AccountRequiredException {
         if (!API_ENABLED) {
             logger.info("collectMapsFromAPIResponse:disabled");
             return -1;
@@ -2796,6 +2802,7 @@ public class YoutubeHelper {
                 brc.getPage(request);
                 if (brc.getRegex("\"status\"\\s*:\\s*\"LOGIN_REQUIRED\"").patternFind()) {
                     // skip parsing
+                    throw new AccountRequiredException();
                 } else if (request.getHttpConnection().getResponseCode() == 200) {
                     final Map<String, Object> response = JSonStorage.restoreFromString(request.getHtmlCode(), TypeRef.MAP);
                     ret += collectMapsFromPlayerResponse(response, "api.tv");
@@ -2808,6 +2815,8 @@ public class YoutubeHelper {
                 }
             }
         } catch (InterruptedException e) {
+            throw e;
+        } catch (AccountRequiredException e) {
             throw e;
         } catch (Exception e) {
             API_ENABLED = false;
@@ -2984,16 +2993,20 @@ public class YoutubeHelper {
         return false;
     }
 
-    /** Wrapper */
-    public YoutubeStreamData convert(final UrlQuery query, final String src) {
-        final Map<String, Object> qualityMap = new HashMap<String, Object>();
+    /**
+     * Wrapper
+     *
+     * @throws PluginException
+     */
+    public YoutubeStreamData convert(final UrlQuery query, final String src) throws PluginException {
+        final Map<String, Object> qualityMap = new LinkedHashMap<String, Object>();
         for (final Entry<String, String> es : query.toMap(true).entrySet()) {
             qualityMap.put(es.getKey(), es.getValue());
         }
         return this.convert(qualityMap, src);
     }
 
-    public YoutubeStreamData convert(Map<String, Object> entry, final String src) {
+    public YoutubeStreamData convert(Map<String, Object> entry, final String src) throws PluginException {
         if (entry == null) {
             return null;
         }
@@ -3017,7 +3030,7 @@ public class YoutubeHelper {
                     // LuanRT/yt-sabr-shaka-demo
                     // yt-dlp/yt-dlp/issues/12482
                     // iv-org/invidious/issues/5263
-                    throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
+                    throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT, "SABR");
                 }
                 queryURL = URLDecoder.decode(queryURL, "UTF-8");
                 if (queryURL.contains("&n=")) {
@@ -3165,14 +3178,18 @@ public class YoutubeHelper {
                 final String dataSrc = "new_adaptive_fmts_map." + src;
                 final Map<YoutubeITAG, List<YoutubeStreamData>> dataMap = new LinkedHashMap<YoutubeITAG, List<YoutubeStreamData>>();
                 for (final Map<String, Object> format : adaptiveFormats) {
-                    final YoutubeStreamData data = convert(format, dataSrc);
-                    if (data != null) {
-                        List<YoutubeStreamData> list = dataMap.get(data.getItag());
-                        if (list == null) {
-                            list = new ArrayList<YoutubeStreamData>();
-                            dataMap.put(data.getItag(), list);
+                    try {
+                        final YoutubeStreamData data = convert(format, dataSrc);
+                        if (data != null) {
+                            List<YoutubeStreamData> list = dataMap.get(data.getItag());
+                            if (list == null) {
+                                list = new ArrayList<YoutubeStreamData>();
+                                dataMap.put(data.getItag(), list);
+                            }
+                            list.add(data);
                         }
-                        list.add(data);
+                    } catch (PluginException e) {
+                        logger.log(e);
                     }
                 }
                 for (Entry<YoutubeITAG, List<YoutubeStreamData>> dataMapEntry : dataMap.entrySet()) {
@@ -3208,28 +3225,32 @@ public class YoutubeHelper {
             if (formats != null && formats.size() > 0) {
                 final String dataSrc = "new_fmt_stream_map." + src;
                 for (final Map<String, Object> format : formats) {
-                    final YoutubeStreamData data = convert(format, dataSrc);
-                    if (data != null) {
-                        if (fmtMaps.add(new StreamMap(data, dataSrc))) {
-                            ret++;
+                    try {
+                        final YoutubeStreamData data = convert(format, dataSrc);
+                        if (data != null) {
+                            if (fmtMaps.add(new StreamMap(data, dataSrc))) {
+                                ret++;
+                            }
                         }
+                    } catch (PluginException e) {
+                        logger.log(e);
                     }
                 }
             }
-        }
-        if (dashMpdEnabled && streamingData != null && streamingData.containsKey("dashManifestUrl")) {
-            final String url = (String) streamingData.get("dashManifestUrl");
-            if (StringUtils.isNotEmpty(url)) {
-                try {
-                    final String dataSrc = "new_dashManifestUrl." + src;
-                    final List<YoutubeStreamData> datas = parseDashManifest(dataSrc, br, br.getURL(url).toString());
-                    for (YoutubeStreamData data : datas) {
-                        if (fmtMaps.add(new StreamMap(data, dataSrc))) {
-                            ret++;
+            if (dashMpdEnabled && streamingData != null && streamingData.containsKey("dashManifestUrl")) {
+                final String url = (String) streamingData.get("dashManifestUrl");
+                if (StringUtils.isNotEmpty(url)) {
+                    try {
+                        final String dataSrc = "new_dashManifestUrl." + src;
+                        final List<YoutubeStreamData> datas = parseDashManifest(dataSrc, br, br.getURL(url).toString());
+                        for (YoutubeStreamData data : datas) {
+                            if (fmtMaps.add(new StreamMap(data, dataSrc))) {
+                                ret++;
+                            }
                         }
+                    } catch (Exception e) {
+                        logger.log(e);
                     }
-                } catch (Exception e) {
-                    logger.log(e);
                 }
             }
         }
@@ -4032,7 +4053,7 @@ public class YoutubeHelper {
             }
         }
         if (defaultLanguage != null) {
-            final Set<Locale> autoTranslatedSubtitlesSet = new HashSet<Locale>();
+            final Set<Locale> autoTranslatedSubtitlesSet = new LinkedHashSet<Locale>();
             final List<String> autoTranslatedSubtitles = CFG_YOUTUBE.CFG.getAutoTranslatedSubtitles();
             if (autoTranslatedSubtitles != null && autoTranslatedSubtitles.size() > 0) {
                 for (String autoTranslatedSubtitle : autoTranslatedSubtitles) {
@@ -4348,7 +4369,7 @@ public class YoutubeHelper {
             // there are many of these on the page
             final String ytcfgSet[] = br.getRegex("ytcfg\\.set\\((\\{.*?\\})\\);").getColumn(0);
             if (ytcfgSet != null) {
-                final Map<String, Object> set = new HashMap<String, Object>();
+                final Map<String, Object> set = new LinkedHashMap<String, Object>();
                 for (final String ytcfg : ytcfgSet) {
                     final Map<String, Object> map = jsonToJavaMap(ytcfg, false);
                     if (map != null && map.size() > 0) {

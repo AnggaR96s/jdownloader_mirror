@@ -18,15 +18,15 @@ package jd.plugins.hoster;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.jdownloader.plugins.components.XFileSharingProBasic;
-
 import jd.PluginWrapper;
 import jd.plugins.Account;
 import jd.plugins.Account.AccountType;
 import jd.plugins.DownloadLink;
 import jd.plugins.HostPlugin;
 
-@HostPlugin(revision = "$Revision: 52794 $", interfaceVersion = 3, names = {}, urls = {})
+import org.jdownloader.plugins.components.XFileSharingProBasic;
+
+@HostPlugin(revision = "$Revision: 53401 $", interfaceVersion = 3, names = {}, urls = {})
 public class DownupSpace extends XFileSharingProBasic {
     public DownupSpace(final PluginWrapper wrapper) {
         super(wrapper);
@@ -43,7 +43,7 @@ public class DownupSpace extends XFileSharingProBasic {
     public static List<String[]> getPluginDomains() {
         final List<String[]> ret = new ArrayList<String[]>();
         // each entry in List<String[]> will result in one PluginForHost, Plugin.getHost() will return String[0]->main domain
-        ret.add(new String[] { "downup.me", "downup.space" });
+        ret.add(new String[] { "downup.me", "downup.space", "dwp.la" });
         return ret;
     }
 
@@ -122,5 +122,11 @@ public class DownupSpace extends XFileSharingProBasic {
     public ArrayList<String> getCleanupHTMLRegexes() {
         /** 2026-05-11: Important because default handling will remove Cloudflare Turnstile captcha html as that is "display:none"! */
         return null;
+    }
+
+    @Override
+    protected boolean supportsShortURLs() {
+        /* 2026-09-10: via dwp.la */
+        return true;
     }
 }

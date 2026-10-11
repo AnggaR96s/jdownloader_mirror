@@ -19,21 +19,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import jd.config.Property;
-import jd.controlling.AccountController;
-import jd.controlling.captcha.CaptchaSettings;
-import jd.controlling.downloadcontroller.AccountCache.CachedAccount;
-import jd.controlling.downloadcontroller.event.DownloadWatchdogEvent;
-import jd.controlling.packagecontroller.PackageControllerQueue.ReadOnlyQueueAction;
-import jd.plugins.Account;
-import jd.plugins.AccountInfo;
-import jd.plugins.AccountTrafficView;
-import jd.plugins.DownloadLink;
-import jd.plugins.FilePackage;
-import jd.plugins.PluginForHost;
-import jd.plugins.download.raf.FileBytesCache;
-import jd.utils.JDUtilities;
-
 import org.appwork.storage.config.JsonConfig;
 import org.appwork.utils.NullsafeAtomicReference;
 import org.appwork.utils.StringUtils;
@@ -49,7 +34,22 @@ import org.jdownloader.plugins.controller.host.HostPluginController;
 import org.jdownloader.plugins.controller.host.LazyHostPlugin;
 import org.jdownloader.settings.GeneralSettings;
 import org.jdownloader.settings.IfFileExistsAction;
-import org.jdownloader.settings.IfFilenameTooLongAction;
+
+import jd.config.Property;
+import jd.controlling.AccountController;
+import jd.controlling.captcha.CaptchaSettings;
+import jd.controlling.downloadcontroller.AccountCache.CachedAccount;
+import jd.controlling.downloadcontroller.IfFilenameTooLongDialog.IfFilenameTooLongAction;
+import jd.controlling.downloadcontroller.event.DownloadWatchdogEvent;
+import jd.controlling.packagecontroller.PackageControllerQueue.ReadOnlyQueueAction;
+import jd.plugins.Account;
+import jd.plugins.AccountInfo;
+import jd.plugins.AccountTrafficView;
+import jd.plugins.DownloadLink;
+import jd.plugins.FilePackage;
+import jd.plugins.PluginForHost;
+import jd.plugins.download.raf.FileBytesCache;
+import jd.utils.JDUtilities;
 
 public class DownloadSession extends Property {
     public static enum STOPMARK {
@@ -82,10 +82,11 @@ public class DownloadSession extends Property {
     private final WeakHashMap<DownloadLink, DownloadLinkCandidateHistory> candidateHistory           = new WeakHashMap<DownloadLink, DownloadLinkCandidateHistory>();
     private final WeakHashMap<UniqueAlltimeID, IfFileExistsAction>        fileExistsActions          = new WeakHashMap<UniqueAlltimeID, IfFileExistsAction>();
     private final WeakHashMap<UniqueAlltimeID, IfFilenameTooLongAction>   fileFilenameTooLongActions = new WeakHashMap<UniqueAlltimeID, IfFilenameTooLongAction>();
+    /** Session-wide "Don't ask again during this session" decisions (null = not set). */
+    private volatile IfFileExistsAction                                  sessionFileExistsAction    = null;
+    private volatile IfFilenameTooLongAction                             sessionFilenameTooLongAction = null;
     private final AtomicInteger                                           downloadsStarted           = new AtomicInteger(0);
     private final AtomicInteger                                           skipCounter                = new AtomicInteger(0);
-    private final NullsafeAtomicReference<Integer>                        speedLimitBeforePause      = new NullsafeAtomicReference<Integer>(null);
-    private final NullsafeAtomicReference<Boolean>                        speedLimitedBeforePause    = new NullsafeAtomicReference<Boolean>(null);
     private volatile List<DownloadLink>                                   forcedLinks                = new CopyOnWriteArrayList<DownloadLink>();
     private volatile List<DownloadLink>                                   activationRequests         = new CopyOnWriteArrayList<DownloadLink>();
     private final WeakHashMap<PluginForHost, PluginClassLoaderChild>      activationPluginCache      = new WeakHashMap<PluginForHost, PluginClassLoaderChild>();
@@ -94,66 +95,66 @@ public class DownloadSession extends Property {
     private AtomicLong                                                    activatorRebuildRequest    = new AtomicLong(1);
     private NullsafeAtomicReference<CaptchaSettings.MODE>                 captchaMode                = new NullsafeAtomicReference<CaptchaSettings.MODE>(CaptchaSettings.MODE.NORMAL);
     private final static Comparator<CachedAccount>                        EXPIRE_DATE_SORTER         = new Comparator<CachedAccount>() {
-        public final int compare(long x, long y) {
-            return (x < y) ? -1 : ((x == y) ? 0 : 1);
-        }
+                                                                                                         public final int compare(long x, long y) {
+                                                                                                             return (x < y) ? -1 : ((x == y) ? 0 : 1);
+                                                                                                         }
 
-        public final long getExpireDate(Account account) {
-            if (account == null) {
-                return Long.MAX_VALUE;
-            } else {
-                final long validUntil = account.getValidPremiumUntil();
-                if (validUntil <= 0) {
-                    return Long.MAX_VALUE;
-                } else {
-                    return validUntil;
-                }
-            }
-        }
+                                                                                                         public final long getExpireDate(Account account) {
+                                                                                                             if (account == null) {
+                                                                                                                 return Long.MAX_VALUE;
+                                                                                                             } else {
+                                                                                                                 final long validUntil = account.getValidPremiumUntil();
+                                                                                                                 if (validUntil <= 0) {
+                                                                                                                     return Long.MAX_VALUE;
+                                                                                                                 } else {
+                                                                                                                     return validUntil;
+                                                                                                                 }
+                                                                                                             }
+                                                                                                         }
 
-        @Override
-        public int compare(CachedAccount account1, CachedAccount account2) {
-            final long expireDate1 = getExpireDate(account1.getAccount());
-            final long expireDate2 = getExpireDate(account2.getAccount());
-            return compare(expireDate1, expireDate2);
-        }
-    };
+                                                                                                         @Override
+                                                                                                         public int compare(CachedAccount account1, CachedAccount account2) {
+                                                                                                             final long expireDate1 = getExpireDate(account1.getAccount());
+                                                                                                             final long expireDate2 = getExpireDate(account2.getAccount());
+                                                                                                             return compare(expireDate1, expireDate2);
+                                                                                                         }
+                                                                                                     };
     private final static Comparator<CachedAccount>                        TRAFFIC_LEFT_SORTER        = new Comparator<CachedAccount>() {
-        public final int compare(long x, long y) {
-            return (x < y) ? -1 : ((x == y) ? 0 : 1);
-        }
+                                                                                                         public final int compare(long x, long y) {
+                                                                                                             return (x < y) ? -1 : ((x == y) ? 0 : 1);
+                                                                                                         }
 
-        public final long getTrafficLeft(Account account) {
-            if (account == null) {
-                return Long.MAX_VALUE;
-            } else {
-                final AccountTrafficView accountTrafficView = account.getAccountTrafficView();
-                if (accountTrafficView == null || accountTrafficView.isUnlimitedTraffic()) {
-                    return Long.MAX_VALUE;
-                } else {
-                    return accountTrafficView.getTrafficLeft();
-                }
-            }
-        }
+                                                                                                         public final long getTrafficLeft(Account account) {
+                                                                                                             if (account == null) {
+                                                                                                                 return Long.MAX_VALUE;
+                                                                                                             } else {
+                                                                                                                 final AccountTrafficView accountTrafficView = account.getAccountTrafficView();
+                                                                                                                 if (accountTrafficView == null || accountTrafficView.isUnlimitedTraffic()) {
+                                                                                                                     return Long.MAX_VALUE;
+                                                                                                                 } else {
+                                                                                                                     return accountTrafficView.getTrafficLeft();
+                                                                                                                 }
+                                                                                                             }
+                                                                                                         }
 
-        @Override
-        public int compare(CachedAccount account1, CachedAccount account2) {
-            final long trafficLeft1 = getTrafficLeft(account1.getAccount());
-            final long trafficLeft2 = getTrafficLeft(account2.getAccount());
-            return compare(trafficLeft1, trafficLeft2);
-        }
-    };
+                                                                                                         @Override
+                                                                                                         public int compare(CachedAccount account1, CachedAccount account2) {
+                                                                                                             final long trafficLeft1 = getTrafficLeft(account1.getAccount());
+                                                                                                             final long trafficLeft2 = getTrafficLeft(account2.getAccount());
+                                                                                                             return compare(trafficLeft1, trafficLeft2);
+                                                                                                         }
+                                                                                                     };
     private final static Comparator<CachedAccount>                        ACCOUNT_SORTER             = new Comparator<CachedAccount>() {
-        @Override
-        public int compare(CachedAccount o1, CachedAccount o2) {
-            final int ret = EXPIRE_DATE_SORTER.compare(o1, o2);
-            if (ret == 0) {
-                return TRAFFIC_LEFT_SORTER.compare(o1, o2);
-            } else {
-                return ret;
-            }
-        }
-    };
+                                                                                                         @Override
+                                                                                                         public int compare(CachedAccount o1, CachedAccount o2) {
+                                                                                                             final int ret = EXPIRE_DATE_SORTER.compare(o1, o2);
+                                                                                                             if (ret == 0) {
+                                                                                                                 return TRAFFIC_LEFT_SORTER.compare(o1, o2);
+                                                                                                             } else {
+                                                                                                                 return ret;
+                                                                                                             }
+                                                                                                         }
+                                                                                                     };
 
     public CaptchaSettings.MODE getCaptchaMode() {
         return captchaMode.get();
@@ -221,18 +222,6 @@ public class DownloadSession extends Property {
         return skipCounter.get();
     }
 
-    public int getSpeedLimitBeforePause() {
-        Integer ret = speedLimitBeforePause.get();
-        if (ret == null) {
-            return -1;
-        }
-        return Math.max(-1, ret);
-    }
-
-    public Boolean isSpeedWasLimitedBeforePauseEnabled() {
-        return speedLimitedBeforePause.get();
-    }
-
     protected void setActivationRequests(List<DownloadLink> activationRequests) {
         if (isCandidatesRefreshRequired() == false) {
             if (!activationRequests.equals(this.activationRequests)) {
@@ -284,36 +273,36 @@ public class DownloadSession extends Property {
     }
 
     private final CopyOnWriteArraySet<SingleDownloadController> controllers        = new CopyOnWriteArraySet<SingleDownloadController>() {
-        /**
-         *
-         */
-         private static final long serialVersionUID = -3897088297641777499L;
+                                                                                       /**
+                                                                                        *
+                                                                                        */
+                                                                                       private static final long serialVersionUID = -3897088297641777499L;
 
-        public boolean add(SingleDownloadController e) {
-            downloadsStarted.incrementAndGet();
-            e.getDownloadLinkCandidate().getLink().setDownloadLinkController(e);
-            return super.add(e);
-        };
+                                                                                       public boolean add(SingleDownloadController e) {
+                                                                                           downloadsStarted.incrementAndGet();
+                                                                                           e.getDownloadLinkCandidate().getLink().setDownloadLinkController(e);
+                                                                                           return super.add(e);
+                                                                                       };
 
-        @Override
-        public boolean remove(Object e) {
-            final boolean ret = super.remove(e);
-            if (ret) {
-                try {
-                    getDiskSpaceManager().freeAllReservationsBy(e);
-                } catch (final Throwable ignore) {
-                }
-                try {
-                    getFileAccessManager().unlockAllHeldby(e);
-                } finally {
-                    if (e instanceof SingleDownloadController) {
-                        ((SingleDownloadController) e).getDownloadLinkCandidate().getLink().setDownloadLinkController(null);
-                    }
-                }
-            }
-            return ret;
-        };
-    };
+                                                                                       @Override
+                                                                                       public boolean remove(Object e) {
+                                                                                           final boolean ret = super.remove(e);
+                                                                                           if (ret) {
+                                                                                               try {
+                                                                                                   getDiskSpaceManager().freeAllReservationsBy(e);
+                                                                                               } catch (final Throwable ignore) {
+                                                                                               }
+                                                                                               try {
+                                                                                                   getFileAccessManager().unlockAllHeldby(e);
+                                                                                               } finally {
+                                                                                                   if (e instanceof SingleDownloadController) {
+                                                                                                       ((SingleDownloadController) e).getDownloadLinkCandidate().getLink().setDownloadLinkController(null);
+                                                                                                   }
+                                                                                               }
+                                                                                           }
+                                                                                           return ret;
+                                                                                       };
+                                                                                   };
     private final long                                          createTime;
     private static volatile WeakReference<FileBytesCache>       downloadWriteCache = null;
 
@@ -721,8 +710,17 @@ public class DownloadSession extends Property {
         DownloadWatchDog.getInstance().getEventSender().fireEvent(new DownloadWatchdogEvent(this, DownloadWatchdogEvent.Type.PROPERTY_CHANGE, new DownloadWatchDogProperty(DownloadWatchDogProperty.Property.STOPSIGN, entry)));
     }
 
+    /** This never returns null! */
     public IfFileExistsAction getOnFileExistsAction(FilePackage filePackage) {
-        return fileExistsActions.get(filePackage.getUniqueID());
+        IfFileExistsAction ret = fileExistsActions.get(filePackage.getUniqueID());
+        if (ret != null) {
+            return ret;
+        }
+        ret = generalSettings.getIfFileExistsAction();
+        if (ret != null) {
+            return ret;
+        }
+        return IfFileExistsAction.ASK_FOR_EACH_FILE;
     }
 
     public void setOnFileExistsAction(FilePackage filePackage, IfFileExistsAction action) {
@@ -737,8 +735,24 @@ public class DownloadSession extends Property {
         }
     }
 
+    private final GeneralSettings generalSettings = JsonConfig.create(GeneralSettings.class);
+
+    /**
+     * Returns cached user selected action. <br>
+     * This never returns null. <br>
+     * Returns action from config if no cached action is available.
+     */
     public IfFilenameTooLongAction getOnFilenameTooLongAction(final FilePackage filePackage) {
-        return fileFilenameTooLongActions.get(filePackage.getUniqueID());
+        IfFilenameTooLongAction ret = fileFilenameTooLongActions.get(filePackage.getUniqueID());
+        if (ret != null) {
+            return ret;
+        }
+        /* No remembered decision yet -> we will ask the user */
+        ret = generalSettings.getIfFilenameTooLongAction();
+        if (ret != null) {
+            return ret;
+        }
+        return IfFilenameTooLongAction.ASK_FOR_EACH_FILE;
     }
 
     public void setOnFileFilenameTooLongAction(FilePackage filePackage, IfFilenameTooLongAction action) {
@@ -751,6 +765,24 @@ public class DownloadSession extends Property {
         } else {
             fileFilenameTooLongActions.put(filePackage.getUniqueID(), action);
         }
+    }
+
+    /** Session-wide "Don't ask again during this session" decision for existing files; null when not set. */
+    public IfFileExistsAction getSessionOnFileExistsAction() {
+        return sessionFileExistsAction;
+    }
+
+    public void setSessionOnFileExistsAction(IfFileExistsAction action) {
+        this.sessionFileExistsAction = action;
+    }
+
+    /** Session-wide "Don't ask again during this session" decision for too long filenames; null when not set. */
+    public IfFilenameTooLongAction getSessionOnFilenameTooLongAction() {
+        return sessionFilenameTooLongAction;
+    }
+
+    public void setSessionOnFilenameTooLongAction(IfFilenameTooLongAction action) {
+        this.sessionFilenameTooLongAction = action;
     }
 
     public FileAccessManager getFileAccessManager() {
@@ -795,14 +827,6 @@ public class DownloadSession extends Property {
 
     public boolean setCandidatesRefreshRequired(boolean b) {
         return refreshCandidates.getAndSet(b);
-    }
-
-    public void setSpeedLimitBeforePause(int downloadSpeedLimit) {
-        speedLimitBeforePause.set(downloadSpeedLimit);
-    }
-
-    public void setSpeedWasLimitedBeforePauseEnabled(boolean b) {
-        speedLimitedBeforePause.set(b);
     }
 
     public boolean compareAndSetSessionState(SessionState expect, SessionState update) {

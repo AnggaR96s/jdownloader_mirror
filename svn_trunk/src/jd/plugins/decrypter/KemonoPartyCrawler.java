@@ -35,14 +35,15 @@ import org.appwork.utils.DebugMode;
 import org.appwork.utils.Files;
 import org.appwork.utils.Regex;
 import org.appwork.utils.StringUtils;
+import org.appwork.utils.net.URLHelper;
 import org.appwork.utils.parser.UrlQuery;
+import org.jdownloader.controlling.Priority;
 import org.jdownloader.controlling.filter.CompiledFiletypeFilter;
 import org.jdownloader.plugins.components.config.KemonoPartyConfig;
 import org.jdownloader.plugins.components.config.KemonoPartyConfig.PostRevisionMode;
 import org.jdownloader.plugins.components.config.KemonoPartyConfig.TextCrawlMode;
 import org.jdownloader.plugins.components.config.KemonoPartyConfigCoomerParty;
 import org.jdownloader.plugins.components.config.KemonoPartyConfigPawchiveSt;
-import org.jdownloader.plugins.config.PluginJsonConfig;
 import org.jdownloader.plugins.controller.LazyPlugin;
 import org.jdownloader.scripting.JavaScriptEngineFactory;
 
@@ -60,11 +61,13 @@ import jd.plugins.DecrypterRetryException.RetryReason;
 import jd.plugins.DownloadLink;
 import jd.plugins.FilePackage;
 import jd.plugins.LinkStatus;
+import jd.plugins.Plugin;
 import jd.plugins.PluginException;
 import jd.plugins.PluginForDecrypt;
+import jd.plugins.PluginForHost;
 import jd.plugins.hoster.KemonoParty;
 
-@DecrypterPlugin(revision = "$Revision: 53244 $", interfaceVersion = 3, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 53546 $", interfaceVersion = 3, names = {}, urls = {})
 public class KemonoPartyCrawler extends PluginForDecrypt {
     public KemonoPartyCrawler(PluginWrapper wrapper) {
         super(wrapper);
@@ -78,16 +81,7 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
     @Override
     public Browser createNewBrowserInstance() {
         final Browser br = super.createNewBrowserInstance();
-        br.setFollowRedirects(true);
-        return br;
-    }
-
-    @Override
-    public void init() {
-        for (String host : siteSupportedNames()) {
-            Browser.setRequestIntervalLimitGlobal(host, false, 1250);
-        }
-        super.init();
+        return KemonoParty.prepBrowser(this, br);
     }
 
     public static List<String[]> getPluginDomains() {
@@ -136,7 +130,7 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
     private KemonoPartyConfig cfg = null;
 
     public ArrayList<DownloadLink> decryptIt(final CryptedLink param, ProgressController progress) throws Exception {
-        cfg = PluginJsonConfig.get(getConfigInterface());
+        cfg = get(getConfigInterface());
         cl = param;
         if (new Regex(param.getCryptedUrl(), PATTERN_PROFILE).patternFind()) {
             return this.crawlProfile(param);
@@ -150,6 +144,7 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
 
     @Override
     public void clean() {
+        hostPlugin = null;
         cfg = null;
         super.clean();
     }
@@ -335,7 +330,7 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         final String service = urlinfo.getMatch(0);
         final String usernameOrUserID = urlinfo.getMatch(1);
         final String postID = urlinfo.getMatch(2);
-        final String revisionID = urlinfo.getMatch(4);
+        final String revisionID = urlinfo.getMatch(5);
         return crawlPostAPI(br, service, usernameOrUserID, postID, revisionID);
     }
 
@@ -438,34 +433,46 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         Boolean has_full = (Boolean) postmap.get("has_full");
         /* 2026-08-07: Workaround for possibly wrong/outdated "has_full" state. */
         /* preview_state field is optional or only from pawchive */
-        final Object preview_stateO = postmap.get("preview_state");
+        final Object preview_stateO = postmap.get("preview_state");// scraped, pending
         if (Boolean.FALSE.equals(has_full) && preview_stateO instanceof String && preview_stateO.toString().equalsIgnoreCase("scraped")) {
             logger.info("Found item with has_full == false AND preview_state == 'scraped'");
             has_full = true;
         }
         final Map<String, Object> filemap = (Map<String, Object>) postmap.get("file");
         if (!filemap.isEmpty() && filemap.get("path") != null) {
-            final DownloadLink media = buildFileDownloadLinkAPI(dupes, useAdvancedDupecheck, filemap, index, has_full);
-            /* null = item is a duplicate */
-            if (media != null) {
-                directResults.add(media);
-                index++;
-            }
+            final List<DownloadLink> mediaItems = buildFileDownloadLinksAPI(dupes, useAdvancedDupecheck, filemap, index, has_full);
+            /* Empty list = item is a duplicate or was skipped due to file version mode */
+            directResults.addAll(mediaItems);
+            index += mediaItems.size();
             numberofResultsSimpleCount++;
         }
         final List<Map<String, Object>> attachments = (List<Map<String, Object>>) postmap.get("attachments");
+        /*
+         * Workaround: Some attachments are "deferred", meaning the API returns them without a downloadable "path" and only with the
+         * "deferred" flag set to true. Their download-URLs are only available on the website (non-API) post page. We collect their
+         * filenames here and resolve them via the website further down below.
+         */
+        final Map<String, Integer> deferredAttachmentIndexes = new HashMap<String, Integer>();
         if (attachments != null) {
             for (final Map<String, Object> attachment : attachments) {
+                if (Boolean.TRUE.equals(attachment.get("deferred"))) {
+                    /*
+                     * Collect deferred attachment filename along with its current index position to resolve it via the website later on.
+                     * The index must be increased here as well so that the index positions of all following items stay correct.
+                     */
+                    deferredAttachmentIndexes.put(attachment.get("name").toString(), index);
+                    index++;
+                    numberofResultsSimpleCount++;
+                    continue;
+                }
                 if (!attachment.isEmpty() && attachment.get("path") == null) {
                     /* Early-skip invalid items */
                     continue;
                 }
-                final DownloadLink media = buildFileDownloadLinkAPI(dupes, useAdvancedDupecheck, attachment, index, has_full);
-                /* null = item is a duplicate */
-                if (media != null) {
-                    directResults.add(media);
-                    index++;
-                }
+                final List<DownloadLink> mediaItems = buildFileDownloadLinksAPI(dupes, useAdvancedDupecheck, attachment, index, has_full);
+                /* Empty list = item is a duplicate or was skipped due to file version mode */
+                directResults.addAll(mediaItems);
+                index += mediaItems.size();
                 numberofResultsSimpleCount++;
             }
         }
@@ -473,6 +480,8 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
         final FilePackage postFilePackage = getFilePackageForPostCrawler(service, usernameOrUserID, postID, postTitle);
         String postTextContent = (String) postmap.get("content");
+        boolean skippedPostTextContent = false;
+        int numberofHttpLinksFromPostContent = 0;
         if (!StringUtils.isEmpty(postTextContent)) {
             if (cfg.isCrawlHttpLinksFromPostContent()) {
                 /* Place number 1 where we can crawl external http links from */
@@ -481,6 +490,8 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
                 postTextContent = postTextContent.replaceAll("(?i)<a[^>]href\\s*=\\s*\"(.*?)\"[^>]*>\\s*\\1\\s*</a>(?:\\s*</p>[^>]*<p>)?\\s*(?:#|KEY:)\\s*([^< ]*)", "<a href=\"$1#$2\"</a>");
                 final List<CrawledLink> postTextContentLinks = getCrawler().find(getLinkCrawlerGeneration(), getCurrentLink(), postTextContent, br.getURL(), false, false);
                 if (postTextContentLinks != null) {
+                    /* Dupe check for links found in post text content */
+                    final HashSet<String> postTextContentLinkDupes = new HashSet<String>();
                     /* Prepare URL filter if configured */
                     final KemonoPartyConfig.PostTextLinkFilterMode filterMode = cfg.getPostTextLinkFilterMode();
                     Pattern filterPattern = null;
@@ -497,14 +508,9 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
                     }
                     for (CrawledLink postTextContentLink : postTextContentLinks) {
                         final String linkURL = postTextContentLink.getURL();
-                        try {
-                            final URL url = new URL(linkURL);
-                            if (!dupes.add(url.getPath())) {
-                                // alread part of attachments
-                                continue;
-                            }
-                        } catch (final MalformedURLException e) {
-                            logger.log(e);
+                        if (!postTextContentLinkDupes.add(linkURL)) {
+                            /* Duplicate link found in post text content */
+                            continue;
                         }
                         /* Apply URL filter if configured */
                         if (filterPattern != null) {
@@ -520,13 +526,13 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
                             }
                         }
                         ret.add(this.createDownloadlink(linkURL));
+                        numberofHttpLinksFromPostContent++;
                     }
                 }
             }
             final TextCrawlMode mode = cfg.getTextCrawlMode();
             if (mode == TextCrawlMode.ALWAYS || (mode == TextCrawlMode.ONLY_IF_NO_MEDIA_ITEMS_ARE_FOUND && directResults.isEmpty())) {
-                ensureInitHosterplugin();
-                final DownloadLink textfile = new DownloadLink(this.hostPlugin, getHost(), posturl);
+                final DownloadLink textfile = new DownloadLink(ensureInitHosterplugin(), getHost(), posturl);
                 textfile.setProperty(KemonoParty.PROPERTY_TEXT, postTextContent);
                 textfile.setFinalFileName(postFilePackage.getName() + ".txt");
                 try {
@@ -535,8 +541,11 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
                     ignore.printStackTrace();
                 }
                 directResults.add(textfile);
+            } else {
+                skippedPostTextContent = true;
             }
         }
+        logger.info("service: " + service + " | UserID: " + usernameOrUserID + " | PostID: " + postID + " | Attachment/File items in API response: " + numberofResultsSimpleCount + " | Number of unique file items: " + directResults.size() + " | Number of http links from post content: " + numberofHttpLinksFromPostContent + " | skippedPostTextContent: " + skippedPostTextContent);
         if (cfg.isCrawlHttpLinksFromPostContent()) {
             /* Place number 2 where we can crawl external http links from */
             final Map<String, Object> embedmap = (Map<String, Object>) postmap.get("embed");
@@ -572,6 +581,25 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
             }
         }
         final String username = this.findUsername(service, usernameOrUserID);
+        /**
+         * Workaround: Resolve "deferred" attachments (see above) via the website since the API does not provide download-URLs for them.
+         * Items that cannot be found on the website are logged but do not raise an Exception. <br>
+         * Use dupes set as a very cheap way to ensure that we only access website once per post since afaik website does not provide
+         * multiple revisions of a post.
+         */
+        if (!deferredAttachmentIndexes.isEmpty() && dupes.add("deferred_attachments_" + postID)) {
+            /* We are going to perform an additional http request -> Check for abort */
+            if (this.isAbort()) {
+                throw new InterruptedException();
+            }
+            try {
+                directResults.addAll(this.crawlDeferredAttachments(deferredAttachmentIndexes, dupes, posturl));
+            } catch (final Throwable e) {
+                /* Do not allow API crawl process to fail due to problems in website crawler. */
+                logger.log(e);
+                logger.warning("Deferred attachment workaround via website crawler failed");
+            }
+        }
         for (final DownloadLink directResult : directResults) {
             if (!StringUtils.isEmpty(postTitle)) {
                 directResult.setProperty(KemonoParty.PROPERTY_TITLE, postTitle);
@@ -612,26 +640,144 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         return ret;
     }
 
-    private DownloadLink buildFileDownloadLinkAPI(final HashSet<String> dupes, final boolean advancedDupeCheck, final Map<String, Object> filemap, final int index, final Boolean has_full) throws PluginException {
-        this.ensureInitHosterplugin();
+    /**
+     * Workaround for "deferred" attachments. </br>
+     * Some attachments are returned by the API without a downloadable "path" and only with the "deferred" flag set to true. Their
+     * download-URLs are only available on the website (non-API) post page. This method fetches that page and returns download-links for the
+     * attachments whose filename matches one of the given deferred attachment names. </br>
+     * Names that cannot be found on the website are logged but do not raise an Exception.
+     */
+    private ArrayList<DownloadLink> crawlDeferredAttachments(final Map<String, Integer> deferredAttachmentIndexes, final HashSet<String> dupes, final String posturl) throws Exception {
+        final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
+        if (deferredAttachmentIndexes == null || deferredAttachmentIndexes.isEmpty()) {
+            return ret;
+        }
+        logger.info("Trying to find " + deferredAttachmentIndexes.size() + " deferred attachment(s) via website: " + deferredAttachmentIndexes.keySet());
+        final Browser brc = br.cloneBrowser();
+        getPage(brc, posturl);
+        /* Collect all attachment download-links available on the website mapped by their filename. */
+        final Map<String, String> websiteAttachmentsByFilename = new HashMap<String, String>();
+        final String[] attachmentURLs = brc.getRegex("class=\"post__attachment-link\"[^>]*href=\"(https?://[^\"]+)\"").getColumn(0);
+        if (attachmentURLs != null) {
+            for (String attachmentURL : attachmentURLs) {
+                attachmentURL = Encoding.htmlOnlyDecode(attachmentURL);
+                final String filenameFromURL = Plugin.getFileNameFromURL(new URL(attachmentURL));
+                if (filenameFromURL != null) {
+                    websiteAttachmentsByFilename.put(filenameFromURL, attachmentURL);
+                }
+            }
+        }
+        for (final Map.Entry<String, Integer> deferredAttachmentEntry : deferredAttachmentIndexes.entrySet()) {
+            final String deferredAttachmentName = deferredAttachmentEntry.getKey();
+            final int index = deferredAttachmentEntry.getValue().intValue();
+            final String url = websiteAttachmentsByFilename.get(deferredAttachmentName);
+            if (url == null) {
+                /* Deferred attachment could not be found on the website -> Log but do not throw an Exception. */
+                logger.warning("Failed to find deferred attachment on website: " + deferredAttachmentName);
+                continue;
+            }
+            /*
+             * Add the matched link (without parameters, as the signature parameters change on each request) to the dupe set to avoid
+             * duplicates.
+             */
+            final String urlWithoutParameters = URLHelper.getUrlWithoutParams(url);
+            if (!dupes.add(urlWithoutParameters)) {
+                /* Skip dupe */
+                logger.info("Skipping already known deferred attachment: " + deferredAttachmentName);
+                continue;
+            }
+            /* Build the DownloadLink similar to buildFileDownloadLinkAPI so it is handled the same way as regular attachments. */
+            final DownloadLink deferredAttachment = new DownloadLink(ensureInitHosterplugin(), getHost(), url);
+            deferredAttachment.setFinalFileName(deferredAttachmentName);
+            deferredAttachment.setProperty(KemonoParty.PROPERTY_BETTER_FILENAME, deferredAttachmentName);
+            deferredAttachment.setProperty(KemonoParty.PROPERTY_POST_CONTENT_INDEX, index);
+            /* These items will be deleted soon -> Set high priority in hope to download them first */
+            deferredAttachment.setPriorityEnum(Priority.HIGHEST);
+            ret.add(deferredAttachment);
+            logger.info("Found deferred attachment on website: " + deferredAttachmentName);
+        }
+        return ret;
+    }
+
+    /**
+     * Returns the items to add for the given file/attachment map depending on the availability of the original and the configured crawl
+     * mode. <br>
+     * If only a preview is available, only the preview is returned regardless of the file version mode. <br>
+     * Returns an empty list if the item is a duplicate or if it was skipped due to the file version mode.
+     */
+    private List<DownloadLink> buildFileDownloadLinksAPI(final HashSet<String> dupes, final boolean advancedDupeCheck, final Map<String, Object> filemap, final int index, final Boolean has_full) throws PluginException {
+        final List<DownloadLink> ret = new ArrayList<DownloadLink>();
+        final Object filepathO = filemap.get("path");
+        if (filepathO == null) {
+            /* file map has no downloadable path (e.g. covers/thumbnail-only structure) */
+            return ret;
+        }
+        /**
+         * The has_full field is no always available. <br>
+         * Available for e.g. pawchive.pw <br>
+         * Not available for e.g. kemono.cr
+         */
+        boolean has_full_final = has_full == null ? true : Boolean.TRUE.equals(has_full);
+        if (Boolean.TRUE.equals(filemap.get("preview_only"))) {
+            // pawchive.pw
+            has_full_final = false;
+        }
+        final String filepath = filepathO.toString();
+        /* Evaluate the file type based on the path extension (path is always given). Only images have a real thumbnail. */
+        final boolean isImage = CompiledFiletypeFilter.getExtensionsFilterInterface(Files.getExtension(filepath, true)) instanceof CompiledFiletypeFilter.ImageExtensions;
+        final boolean addOriginal;
+        final boolean addPreview;
+        if (!has_full_final) {
+            /* Only a preview is available -> Takes precedence over the user setting. */
+            addOriginal = false;
+            addPreview = true;
+        } else {
+            switch (cfg.getFileVersionMode()) {
+            case PREVIEW:
+                addOriginal = false;
+                /* Non-image items have no preview and are skipped. */
+                addPreview = isImage;
+                break;
+            case ORIGINAL_AND_PREVIEW:
+                addOriginal = true;
+                addPreview = isImage;
+                break;
+            case ORIGINAL:
+            default:
+                addOriginal = true;
+                addPreview = false;
+                break;
+            }
+        }
+        int currentIndex = index;
+        if (addOriginal) {
+            final DownloadLink original = buildFileDownloadLinkAPI(dupes, advancedDupeCheck, filemap, filepath, currentIndex, true, isImage);
+            /* null = item is a duplicate */
+            if (original != null) {
+                ret.add(original);
+                currentIndex++;
+            }
+        }
+        if (addPreview) {
+            final DownloadLink preview = buildFileDownloadLinkAPI(dupes, advancedDupeCheck, filemap, filepath, currentIndex, false, isImage);
+            if (preview != null) {
+                ret.add(preview);
+            }
+        }
+        return ret;
+    }
+
+    private DownloadLink buildFileDownloadLinkAPI(final HashSet<String> dupes, final boolean advancedDupeCheck, final Map<String, Object> filemap, final String filepath, final int index, final boolean has_full_final, final boolean isImage) throws PluginException {
         /**
          * 2025-06-02: Looks like the "name" field is not always given though it missing can also mean that the original file is
          * broken/missing on the server. <br>
          * Example: /fanbox/user/64937143/post/2095805
          */
         String filename = (String) filemap.get("name");
-        final Object filepathO = filemap.get("path");
-        if (filepathO == null) {
-            /* file map has no downloadable path (e.g. covers/thumbnail-only structure) */
-            return null;
-        }
-        final boolean has_full_final = Boolean.TRUE.equals(has_full);
-        final String filepath = filepathO.toString();
         /*
-         * Evaluate the file type based on the path extension (path is always given). When only a preview is available (has_full == false),
-         * only images have a real thumbnail; any non-image item is offline as it cannot have a thumbnail (e.g. archives).
+         * When only a preview is available (has_full == false), only images have a real thumbnail; any non-image item is offline as it
+         * cannot have a thumbnail (e.g. archives).
          */
-        final boolean isImage = CompiledFiletypeFilter.getExtensionsFilterInterface(Files.getExtension(filepath, true)) instanceof CompiledFiletypeFilter.ImageExtensions;
         final boolean isOfflinePreview = !has_full_final && !isImage;
         String url;
         if (has_full_final) {
@@ -664,13 +810,14 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         if (advancedDupeCheck && sha256hash != null) {
             dupeCheckString = sha256hash;
         } else {
-            dupeCheckString = filepath;
+            /* Prefix for previews so original and preview of the same path are not treated as dupes. */
+            dupeCheckString = has_full_final ? filepath : "thumb_" + filepath;
         }
         if (!dupes.add(dupeCheckString)) {
             /* Skip dupe */
             return null;
         }
-        final DownloadLink media = new DownloadLink(this.hostPlugin, getHost(), url);
+        final DownloadLink media = new DownloadLink(ensureInitHosterplugin(), getHost(), url);
         if (filename != null) {
             media.setFinalFileName(filename);
             media.setProperty(KemonoParty.PROPERTY_BETTER_FILENAME, filename);
@@ -737,10 +884,12 @@ public class KemonoPartyCrawler extends PluginForDecrypt {
         return null;
     }
 
-    private void ensureInitHosterplugin() throws PluginException {
-        if (this.hostPlugin == null) {
-            this.hostPlugin = (KemonoParty) getNewPluginForHostInstance(getHost());
+    private PluginForHost ensureInitHosterplugin() throws PluginException {
+        final PluginForHost hostPlugin = this.hostPlugin;
+        if (hostPlugin != null) {
+            return hostPlugin;
         }
+        return this.hostPlugin = (KemonoParty) getNewPluginForHostInstance(getHost());
     }
 
     @Override

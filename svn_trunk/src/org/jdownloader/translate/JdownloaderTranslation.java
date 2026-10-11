@@ -468,6 +468,30 @@ public interface JdownloaderTranslation extends TranslateInterface {
     @Default(lngs = { "en" }, values = { "Download path too long" })
     String DownloadLink_setSkipped_statusmessage_invalid_path_too_long_path();
 
+    @Default(lngs = { "en" }, values = { "A segment of path is too long to be used [in the current OS]" })
+    String BadFilePathException_PathFailureReason_PATH_SEGMENT_TOO_LONG();
+
+    @Default(lngs = { "en" }, values = { "Total length of path is too long" })
+    String BadFilePathException_PathFailureReason_PATH_TOO_LONG();
+
+    @Default(lngs = { "en" }, values = { "Permission to write file to path is not given" })
+    String BadFilePathException_PathFailureReason_PERMISSION_PROBLEM_FILE();
+
+    @Default(lngs = { "en" }, values = { "Permission to create folder in path is not given" })
+    String BadFilePathException_PathFailureReason_PERMISSION_PROBLEM_FOLDER();
+
+    @Default(lngs = { "en" }, values = { "File already exists" })
+    String BadFilePathException_PathFailureReason_FILE_ALREADY_EXISTS();
+
+    @Default(lngs = { "en" }, values = { "File can't be created because a directory with the same name already exists" })
+    String BadFilePathException_PathFailureReason_FILE_ALREADY_EXISTS_AS_FOLDER();
+
+    @Default(lngs = { "en" }, values = { "This path cannot be used for unknown reasons" })
+    String BadFilePathException_PathFailureReason_INVALID_DESTINATION();
+
+    @Default(lngs = { "en" }, values = { "Failed to delete written test file" })
+    String BadFilePathException_PathFailureReason_WRITE_TEST_DELETION_FAILURE();
+
     @Default(lngs = { "en" }, values = { "Skipped - Account is missing" })
     String DownloadLink_setSkipped_statusmessage_account();
 
@@ -878,6 +902,9 @@ public interface JdownloaderTranslation extends TranslateInterface {
 
     @Default(lngs = { "en" }, values = { "Affected Links: Offline" })
     String GenericDeleteFromDownloadlistAction_getTranslationForDeleteOffline();
+
+    @Default(lngs = { "en" }, values = { "Affected Links: File missing on disk" })
+    String GenericDeleteFromDownloadlistAction_getTranslationForDeleteFileMissing();
 
     @Default(lngs = { "en" }, values = { "Exclude filtered Links" })
     String GenericDeleteFromDownloadlistAction_getTranslationForIgnoreFiltered();

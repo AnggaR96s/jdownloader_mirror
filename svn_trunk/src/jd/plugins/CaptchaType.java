@@ -7,7 +7,6 @@ import javax.swing.Icon;
 
 import org.jdownloader.DomainInfo;
 import org.jdownloader.captcha.v2.Challenge;
-import org.jdownloader.captcha.v2.challenge.clickcaptcha.ClickCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.cloudflareturnstile.CloudflareTurnstileChallenge;
 import org.jdownloader.captcha.v2.challenge.cutcaptcha.CutCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.hcaptcha.HCaptchaChallenge;
@@ -22,7 +21,8 @@ public class CaptchaType {
         IMAGE {
             @Override
             public boolean canHandle(Challenge<?> c) {
-                return c instanceof ImageCaptchaChallenge;
+                /* Click captchas are ImageCaptchaChallenges too but have their own captcha types (see below). */
+                return c instanceof ImageCaptchaChallenge && !(c instanceof MultiClickCaptchaChallenge);
             }
 
             @Override
@@ -44,11 +44,17 @@ public class CaptchaType {
             public String getDomain() {
                 return null;
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         IMAGE_SINGLE_CLICK_CAPTCHA {
             @Override
             public boolean canHandle(Challenge<?> c) {
-                return c instanceof ClickCaptchaChallenge;
+                /* A single click captcha is a click captcha that expects exactly one click. */
+                return c instanceof MultiClickCaptchaChallenge && ((MultiClickCaptchaChallenge) c).isSingleClick();
             }
 
             @Override
@@ -67,6 +73,11 @@ public class CaptchaType {
             }
 
             @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
+
+            @Override
             public String getDomain() {
                 return null;
             }
@@ -74,7 +85,7 @@ public class CaptchaType {
         IMAGE_MULTI_CLICK_CAPTCHA {
             @Override
             public boolean canHandle(Challenge<?> c) {
-                return c instanceof MultiClickCaptchaChallenge;
+                return c instanceof MultiClickCaptchaChallenge && !((MultiClickCaptchaChallenge) c).isSingleClick();
             }
 
             @Override
@@ -90,6 +101,11 @@ public class CaptchaType {
             @Override
             public String getDescription() {
                 return "Advanced click-based captcha requiring multiple clicks on specific elements";
+            }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
             }
 
             @Override
@@ -126,6 +142,11 @@ public class CaptchaType {
             public String getDomain() {
                 return "google.com";
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         RECAPTCHA_V3_ENTERPRISE {
             @Override
@@ -155,6 +176,11 @@ public class CaptchaType {
             @Override
             public String getDomain() {
                 return "google.com";
+            }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
             }
         },
         RECAPTCHA_V2_INVISIBLE {
@@ -190,6 +216,11 @@ public class CaptchaType {
             public String getDomain() {
                 return "google.com";
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         RECAPTCHA_V2_ENTERPRISE {
             @Override
@@ -220,6 +251,11 @@ public class CaptchaType {
             public String getDomain() {
                 return "google.com";
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         RECAPTCHA_V2 {
             @Override
@@ -246,6 +282,11 @@ public class CaptchaType {
             public String getDomain() {
                 return "google.com";
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         HCAPTCHA {
             @Override
@@ -271,6 +312,11 @@ public class CaptchaType {
             @Override
             public String getDomain() {
                 return "hcaptcha.com";
+            }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
             }
         },
         CUTCAPTCHA {
@@ -387,6 +433,11 @@ public class CaptchaType {
             public String getDomain() {
                 return "cloudflare.com";
             }
+
+            @Override
+            public boolean hasTestChallenges() {
+                return true;
+            }
         },
         MT_CAPTCHA {
             @Override
@@ -489,6 +540,15 @@ public class CaptchaType {
         public abstract String getDomain();
 
         /**
+         * True if this captcha type has test data available, i.e. {@link org.jdownloader.captcha.v2.test.CaptchaTestParameters#getDefaults(CAPTCHA_TYPE)}
+         * returns pre-filled values and {@link org.jdownloader.captcha.v2.test.CaptchaTestChallengeFactory} can build a test challenge for it. Used by
+         * the IDE-only "Test &amp; Debug" tab in the captcha settings to decide which types can be selected for testing.
+         */
+        public boolean hasTestChallenges() {
+            return false;
+        }
+
+        /**
          * Checks if this captcha type is supported by JDownloader. This method can be used to collect captchas available in captcha solving
          * services, including those that JDownloader itself does not yet support.
          *
@@ -533,6 +593,7 @@ public class CaptchaType {
 
     public static final boolean HIDE_CAPTCHA_TYPES_NOT_SUPPORTED_BY_JD = true;
 
+    /** Returns captcha types that should be displayed in GUI. */
     public static List<CAPTCHA_TYPE> getProcessableCaptchaTypes() {
         final List<CAPTCHA_TYPE> ctypes = new ArrayList<CAPTCHA_TYPE>();
         for (final CAPTCHA_TYPE ctype : CAPTCHA_TYPE.values()) {

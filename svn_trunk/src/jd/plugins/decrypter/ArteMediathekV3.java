@@ -30,6 +30,7 @@ import org.appwork.storage.TypeRef;
 import org.appwork.utils.DebugMode;
 import org.appwork.utils.Regex;
 import org.appwork.utils.StringUtils;
+import org.jdownloader.downloader.hls.M3U8Playlist;
 import org.jdownloader.plugins.components.config.ArteMediathekConfig;
 import org.jdownloader.plugins.components.config.ArteMediathekConfig.FilenameSchemeType;
 import org.jdownloader.plugins.components.config.ArteMediathekConfig.LanguageSelectionMode;
@@ -58,7 +59,7 @@ import jd.plugins.PluginForDecrypt;
 import jd.plugins.hoster.ArteTv;
 import jd.plugins.hoster.DirectHTTP;
 
-@DecrypterPlugin(revision = "$Revision: 53264 $", interfaceVersion = 4, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 53356 $", interfaceVersion = 4, names = {}, urls = {})
 public class ArteMediathekV3 extends PluginForDecrypt {
     public ArteMediathekV3(PluginWrapper wrapper) {
         super(wrapper);
@@ -284,8 +285,20 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             final String url = stream.get("url").toString();
             final Browser hls = brc.cloneBrowser();
             hls.getPage(url);
-            List<HlsContainer> qualities = HlsContainer.getHlsQualities(hls);
-            for (HlsContainer quality : qualities) {
+            final List<HlsContainer> qualities = HlsContainer.getHlsQualities(hls);
+            Boolean DRM_checked = null;
+            hlsQualities: for (HlsContainer quality : qualities) {
+                if (DRM_checked == null) {
+                    final Browser check = hls.cloneBrowser();
+                    check.getPage(quality.getStreamURL());
+                    final List<M3U8Playlist> m3u8 = M3U8Playlist.parseM3U8(check);
+                    if (m3u8.get(0).isEncrypted()) {
+                        DRM_checked = Boolean.TRUE;
+                        logger.info("skip HLS due to DRM protection:" + m3u8.get(0).getEncryptionMethod());
+                        break hlsQualities;
+                    }
+                    DRM_checked = Boolean.FALSE;
+                }
                 final StreamCodec streamCodec = quality.getCodecType(CODEC_TYPE.VIDEO);
                 if (streamCodec == null) {
                     throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
@@ -336,7 +349,16 @@ public class ArteMediathekV3 extends PluginForDecrypt {
                     for (String characteristic : media.getCharacteristics()) {
                         if (characteristic.startsWith("tv.arte.audio.version.")) {
                             final String version = characteristic.substring("tv.arte.audio.version.".length());
-                            if ("VF-FRA".equalsIgnoreCase(version)) {
+                            if ("vof-fra".equalsIgnoreCase(version)) {
+                                // Die Sendung wurde ursprünglich auf Französisch gedreht/produziert. Es handelt sich um den nativen O-Ton.
+                                audioCode = "VOF";
+                                audioShortLabel = "FR";
+                            } else if ("VOEU-MUL".equalsIgnoreCase(version)) {
+                                audioCode = "VOEU";
+                                audioShortLabel = "Mul";
+                            } else if ("VF-FRA".equalsIgnoreCase(version)) {
+                                // (Version Française): Eine nachträglich ins Französische synchronisierte Fassung (z. B. bei einem
+                                // deutschen oder englischen Film).
                                 audioCode = "VF";
                                 audioShortLabel = "FR";
                             } else if ("VFAUD-FRA".equalsIgnoreCase(version)) {
@@ -434,6 +456,12 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             }
             if (cfg.isCrawlLanguagePolish()) {
                 selectedLanguages.add(Language.POLISH);
+            }
+            if (cfg.isCrawlLanguageSpanish()) {
+                selectedLanguages.add(Language.SPANISH);
+            }
+            if (cfg.isCrawlLanguageRomanian()) {
+                selectedLanguages.add(Language.ROMANIAN);
             }
             if (cfg.isCrawlLanguageUnknown()) {
                 selectedLanguages.add(Language.OTHER);
@@ -794,6 +822,8 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             return Language.POLISH;
         } else if (iso6391Code.equalsIgnoreCase("es")) {
             return Language.SPANISH;
+        } else if (iso6391Code.equalsIgnoreCase("ro")) {
+            return Language.ROMANIAN;
         } else {
             /* Unknown/unsupported code */
             return Language.OTHER;
@@ -807,10 +837,16 @@ public class ArteMediathekV3 extends PluginForDecrypt {
         ITALIAN,
         SPANISH,
         POLISH,
+        ROMANIAN,
         OTHER;
     }
 
     private static Language parseAudioLanguage(final String apiosCode) {
+        final String euLanguage = new Regex(apiosCode, "^(VOEU\\[[A-Z]+\\])").getMatch(0);
+        if (euLanguage != null) {
+            // uses same identifier
+            return parseSubtitleLanguage(euLanguage);
+        }
         final String languageChar = new Regex(apiosCode, "^VO?([A-Z])").getMatch(0);
         if (languageChar != null) {
             if ("F".equals(languageChar)) {
@@ -838,14 +874,20 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             } else {
                 return Language.OTHER;
             }
-        } else if (apiosCode.endsWith("[ANG]")) {
+        } else if (apiosCode.endsWith("[DEU]") || apiosCode.endsWith("[GER]")) {
+            return Language.GERMAN;
+        } else if (apiosCode.endsWith("[FRA]") || apiosCode.endsWith("[FRE]")) {
+            return Language.FRENCH;
+        } else if (apiosCode.endsWith("[ANG]") || apiosCode.endsWith("[ENG]")) {
             return Language.ENGLISH;
+        } else if (apiosCode.endsWith("[ESP]") || apiosCode.endsWith("[SPA]")) {
+            return Language.SPANISH;
         } else if (apiosCode.endsWith("[ITA]")) {
             return Language.ITALIAN;
         } else if (apiosCode.endsWith("[POL]")) {
             return Language.POLISH;
-        } else if (apiosCode.endsWith("[ESP]")) {
-            return Language.SPANISH;
+        } else if (apiosCode.endsWith("[ROU]")) {
+            return Language.ROMANIAN;
         } else {
             return Language.OTHER;
         }
@@ -866,13 +908,13 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             if (apiosCode.matches(".*?AUD.*?")) {
                 /* E.g. "VFAUD" or "VAAUD" */
                 return AUDIO_DESCRIPTION;
-            } else if (apiosCode.matches("[A-Z]+-ST(A|F)")) {
+            } else if (apiosCode.matches(".*-ST(A|F)")) {
                 /* with partial subtitles in German | French */
                 return PARTIAL;
-            } else if (apiosCode.matches("[A-Z]+-STM(A|F)?.*?")) {
+            } else if (apiosCode.matches(".*-STM(A|F)?.*?")) {
                 /* with German | French subtitles for the deaf and hard-of-hearing */
                 return HEARING_IMPAIRED;
-            } else if (apiosCode.matches("[A-Z]+-STE?.*?")) {
+            } else if (apiosCode.matches(".*-STE?.*?")) {
                 /* Normal subtitles */
                 return FULL;
             } else {
@@ -884,6 +926,7 @@ public class ArteMediathekV3 extends PluginForDecrypt {
 
     private static enum VersionType {
         ORIGINAL,
+        ORIGINAL_EUROPEAN,
         ORIGINAL_FRANCAIS,
         ORIGINAL_GERMAN,
         NON_ORIGINAL_FRANCAIS,
@@ -898,6 +941,10 @@ public class ArteMediathekV3 extends PluginForDecrypt {
             } else if (StringUtils.startsWithCaseInsensitive(apiosCode, "VO-")) {
                 // Original version neither in French nor German, with subtitles
                 return ORIGINAL;
+            }
+            if (StringUtils.startsWithCaseInsensitive(apiosCode, "VOEU")) {
+                // Original european version
+                return ORIGINAL_EUROPEAN;
             }
             if (StringUtils.equalsIgnoreCase(apiosCode, "VOF")) {
                 // Original version in French, without subtitles.
@@ -974,7 +1021,15 @@ public class ArteMediathekV3 extends PluginForDecrypt {
         final Language audioLanguage = parseAudioLanguage(apiosCode);
         final Language subtitleLanguage = parseSubtitleLanguage(apiosCode);
         final VersionType versionType = VersionType.parse(apiosCode);
-        final Language originalAudioLanguage = originalVersionAudioLanguage != null ? iso6391CodeToLanguageEnum(originalVersionAudioLanguage) : null;
+        final Language originalAudioLanguageFromapiosCode;
+        if (versionType == VersionType.ORIGINAL_FRANCAIS) {
+            originalAudioLanguageFromapiosCode = Language.FRENCH;
+        } else if (versionType == VersionType.ORIGINAL_GERMAN) {
+            originalAudioLanguageFromapiosCode = Language.GERMAN;
+        } else {
+            originalAudioLanguageFromapiosCode = null;
+        }
+        final Language originalAudioLanguage = originalVersionAudioLanguage != null ? iso6391CodeToLanguageEnum(originalVersionAudioLanguage) : originalAudioLanguageFromapiosCode;
         return new VersionInfo() {
             @Override
             public SubtitleType getSubtitleType() {
@@ -1080,9 +1135,16 @@ public class ArteMediathekV3 extends PluginForDecrypt {
 
             @Override
             public boolean isOriginalVersion() {
-                if (versionType == VersionType.ORIGINAL || versionType == VersionType.ORIGINAL_FRANCAIS || versionType == VersionType.ORIGINAL_GERMAN) {
+                if (versionType == null) {
+                    return false;
+                }
+                switch (versionType) {
+                case ORIGINAL:
+                case ORIGINAL_EUROPEAN:
+                case ORIGINAL_FRANCAIS:
+                case ORIGINAL_GERMAN:
                     return true;
-                } else {
+                default:
                     return false;
                 }
             }

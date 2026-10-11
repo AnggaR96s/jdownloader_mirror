@@ -22,12 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.appwork.storage.JSonStorage;
-import org.appwork.storage.TypeRef;
-import org.appwork.utils.StringUtils;
-import org.appwork.utils.parser.UrlQuery;
-import org.jdownloader.scripting.JavaScriptEngineFactory;
-
 import jd.PluginWrapper;
 import jd.config.SubConfiguration;
 import jd.controlling.AccountController;
@@ -54,7 +48,12 @@ import jd.plugins.components.PluginJSonUtils;
 import jd.plugins.hoster.DirectHTTP;
 import jd.plugins.hoster.SpankBangCom;
 
-@DecrypterPlugin(revision = "$Revision: 52320 $", interfaceVersion = 2, names = {}, urls = {})
+import org.appwork.storage.TypeRef;
+import org.appwork.utils.StringUtils;
+import org.appwork.utils.parser.UrlQuery;
+import org.jdownloader.scripting.JavaScriptEngineFactory;
+
+@DecrypterPlugin(revision = "$Revision: 53513 $", interfaceVersion = 2, names = {}, urls = {})
 public class SpankBangComCrawler extends PluginForDecrypt {
     public SpankBangComCrawler(PluginWrapper wrapper) {
         super(wrapper);
@@ -95,6 +94,10 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         Browser.setRequestIntervalLimitGlobal(getHost(), 3000);
     }
 
+    private static String buildHostsPatternPart(Plugin plugin) {
+        return buildHostsPatternPart(plugin.siteSupportedNames());
+    }
+
     private SpankBangCom plugin           = null;
     private final String PATTERN_PLAYLIST = "https?://[^/]+/([a-z0-9]+)(-[a-z0-9]+)?/playlist/(\\w+)";
 
@@ -103,10 +106,12 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         return 1;
     }
 
-    public static Browser prepBR(final Browser br) {
+    public static Browser prepBR(Plugin plugin, final Browser br) {
         br.setFollowRedirects(true);
         /* www = English language */
-        br.setCookie("spankbang.com", "language", "www");
+        for (String site : plugin.siteSupportedNames()) {
+            br.setCookie(site, "language", "www");
+        }
         br.getHeaders().put("Accept-Language", "en");
         return br;
     }
@@ -121,7 +126,7 @@ public class SpankBangComCrawler extends PluginForDecrypt {
     }
 
     public ArrayList<DownloadLink> decryptIt(final CryptedLink param, ProgressController progress) throws Exception {
-        prepBR(br);
+        prepBR(this, br);
         prepCrawlerplugin();
         final Account account = AccountController.getInstance().getValidAccount(this.getHost());
         if (account != null) {
@@ -138,12 +143,17 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         }
     }
 
+    public static String rewriteHost(Plugin plugin, final String url) {
+        return url.replaceFirst("(?i)(spankbang.([a-z]+)/)", plugin.getHost() + "/");
+    }
+
     /** Crawls playlists and links to single videos in context of playlist. */
     private ArrayList<DownloadLink> crawlPlaylist(final CryptedLink param) throws Exception {
         final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        br.getPage(param.getCryptedUrl());
+        String cryptedUrl = rewriteHost(this, param.getCryptedUrl());
+        br.getPage(cryptedUrl);
         this.checkErrors(br);
-        final String canonical = br.getRegex("rel\\s*=\\s*\"canonical\"\\s*href\\s*=\\s*\"(https?://(\\w+\\.)?spankbang.com/[a-z0-9\\-]+/(video|embed/playlist)/.*?)\"").getMatch(0);
+        final String canonical = br.getRegex("rel\\s*=\\s*\"canonical\"\\s*href\\s*=\\s*\"(https?://(\\w+\\.)?" + buildHostsPatternPart(this) + "/[a-z0-9\\-]+/(video|embed/playlist)/.*?)\"").getMatch(0);
         if (canonical != null && canHandle(canonical) && !canonical.matches(PATTERN_PLAYLIST)) {
             br.getPage(canonical);
             return this.parseCrawlSingleVideo(br);
@@ -152,7 +162,7 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         if (this.isSingleVideo(br)) {
             return this.parseCrawlSingleVideo(br);
         } else {
-            final Regex playlistInfo = new Regex(param.getCryptedUrl(), PATTERN_PLAYLIST);
+            final Regex playlistInfo = new Regex(cryptedUrl, PATTERN_PLAYLIST);
             final String playlistID = playlistInfo.getMatch(0);
             final String playlistSlug = playlistInfo.getMatch(1);
             if (playlistID == null) {
@@ -207,7 +217,8 @@ public class SpankBangComCrawler extends PluginForDecrypt {
     /** Crawls single videos and single videos that are parts of a playlist. */
     private ArrayList<DownloadLink> crawlSingleVideo(final CryptedLink param) throws Exception {
         br.setAllowedResponseCodes(new int[] { 503 });
-        br.getPage(param.getCryptedUrl().replace("/embed/", "/video/"));
+        final String url = rewriteHost(this, param.getCryptedUrl()).replace("/embed/", "/video/");
+        br.getPage(url);
         return parseCrawlSingleVideo(br);
     }
 
@@ -215,7 +226,7 @@ public class SpankBangComCrawler extends PluginForDecrypt {
     private ArrayList<DownloadLink> parseCrawlSingleVideo(final Browser br) throws Exception {
         checkErrors(br);
         final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
-        final SubConfiguration cfg = SubConfiguration.getConfig(this.getHost());
+        final SubConfiguration cfg = getPluginConfig();
         final boolean fastcheck = cfg.getBooleanProperty(SpankBangCom.FASTLINKCHECK, SpankBangCom.default_FASTLINKCHECK);
         final String currenturl = br.getURL();
         if (isPrivate(this.br)) {
@@ -242,12 +253,12 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         }
         String videoID = findVideoID(br);
         if (videoID == null) {
-            videoID = getFid(currenturl);
+            videoID = getFid(this, currenturl);
         }
         if (videoID == null) {
             throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
         }
-        final LinkedHashMap<String, String> foundQualities = findQualities(this.br, currenturl);
+        final LinkedHashMap<String, String> foundQualities = findQualities(this, this.br, currenturl);
         if (foundQualities == null || foundQualities.size() == 0 || title == null) {
             if (SpankBangCom.isAgeVerificationRequired(br)) {
                 throw new DecrypterRetryException(RetryReason.AGE_VERIFICATION_REQUIRED);
@@ -384,7 +395,7 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         }
     }
 
-    public static LinkedHashMap<String, String> findQualities(final Browser br, final String source_url) throws DecrypterException, PluginException, IOException {
+    public static LinkedHashMap<String, String> findQualities(final Plugin plugin, final Browser br, final String source_url) throws DecrypterException, PluginException, IOException {
         final LinkedHashMap<String, String> foundQualities = new LinkedHashMap<String, String>();
         final String[] knownQualities = new String[] { "4k", "1080p", "720p", "480p", "320p", "240p" };
         // final String fid = getFid(source_url);
@@ -428,7 +439,7 @@ public class SpankBangComCrawler extends PluginForDecrypt {
             final Browser brc = br.cloneBrowser();
             final String page = brc.getPage(request);
             if (page.matches("(?s)^\\s*\\{.*") && page.matches("(?s).*\\}\\s*$")) {
-                final Map<String, Object> map = JSonStorage.restoreFromString(page, TypeRef.MAP);
+                final Map<String, Object> map = plugin.restoreFromString(page, TypeRef.MAP);
                 final String stream_url_m3u8 = String.valueOf(map.get("m3u8"));
                 for (final String quality : knownQualities) {
                     final String qualityID = getQuality(quality);
@@ -496,8 +507,8 @@ public class SpankBangComCrawler extends PluginForDecrypt {
         return null;
     }
 
-    public static String getFid(final String source_url) {
-        return new Regex(source_url, "spankbang\\.com/([a-z0-9]+)/video/").getMatch(0);
+    public static String getFid(Plugin plugin, final String source_url) {
+        return new Regex(source_url, buildHostsPatternPart(plugin) + "/([a-z0-9]+)/video/").getMatch(0);
     }
 
     public static boolean isOffline(final Browser br) {

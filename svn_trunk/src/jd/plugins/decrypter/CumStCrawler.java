@@ -18,23 +18,16 @@ package jd.plugins.decrypter;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.regex.Pattern;
-
-import org.appwork.storage.TypeRef;
-import org.appwork.utils.DebugMode;
-import org.appwork.utils.Files;
-import org.appwork.utils.Regex;
-import org.appwork.utils.StringUtils;
-import org.appwork.utils.parser.UrlQuery;
-import org.jdownloader.plugins.components.config.CumStConfig;
-import org.jdownloader.plugins.components.config.CumStConfig.TextCrawlMode;
-import org.jdownloader.plugins.controller.LazyPlugin;
 
 import jd.PluginWrapper;
 import jd.controlling.ProgressController;
@@ -54,7 +47,17 @@ import jd.plugins.PluginException;
 import jd.plugins.PluginForDecrypt;
 import jd.plugins.hoster.CumSt;
 
-@DecrypterPlugin(revision = "$Revision: 53264 $", interfaceVersion = 3, names = {}, urls = {})
+import org.appwork.storage.TypeRef;
+import org.appwork.utils.DebugMode;
+import org.appwork.utils.Files;
+import org.appwork.utils.Regex;
+import org.appwork.utils.StringUtils;
+import org.appwork.utils.parser.UrlQuery;
+import org.jdownloader.plugins.components.config.CumStConfig;
+import org.jdownloader.plugins.components.config.CumStConfig.TextCrawlMode;
+import org.jdownloader.plugins.controller.LazyPlugin;
+
+@DecrypterPlugin(revision = "$Revision: 53518 $", interfaceVersion = 3, names = {}, urls = {})
 public class CumStCrawler extends PluginForDecrypt {
     public CumStCrawler(PluginWrapper wrapper) {
         super(wrapper);
@@ -109,9 +112,9 @@ public class CumStCrawler extends PluginForDecrypt {
     }
 
     /* service = any platform key without slash (e.g. onlyfans, fansly); creator- and post-ids are numeric, dm-ids are uuids. */
-    private static final Pattern PATTERN_POST      = Pattern.compile("/creators/([^/]+)/(\\d+)/post/(\\d+).*", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PATTERN_DM        = Pattern.compile("/creators/([^/]+)/(\\d+)/dm/([\\w\\-]+).*", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PATTERN_PROFILE   = Pattern.compile("/creators/([^/]+)/([a-zA-Z0-9\\-:]+).*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PATTERN_POST      = Pattern.compile("/creators/([^/]+)/([a-zA-Z0-9\\-:_]+)/post/(\\d+).*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PATTERN_DM        = Pattern.compile("/creators/([^/]+)/([a-zA-Z0-9\\-:_]+)/dm/([\\w\\-]+).*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PATTERN_PROFILE   = Pattern.compile("/creators/([^/]+)/([a-zA-Z0-9\\-:_]+).*", Pattern.CASE_INSENSITIVE);
     /* API- and website path segment for the two supported content types. */
     private static final String  CONTENT_TYPE_POST = "post";
     private static final String  CONTENT_TYPE_DM   = "dm";
@@ -357,7 +360,7 @@ public class CumStCrawler extends PluginForDecrypt {
         }
         getPage(br, this.getApiBase() + "/" + service + "/user/" + creatorID + "/" + contentType + "/" + Encoding.urlEncode(contentID));
         final Map<String, Object> content = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
-        final HashSet<String> dupes = new HashSet<String>();
+        final Set<String> dupes = new HashSet<String>();
         return crawlProcessContentAPI(content, service, creatorID, creatorName, contentType, dupes, cfg.isEnableProfileCrawlerAdvancedDupeFiltering());
     }
 
@@ -366,7 +369,7 @@ public class CumStCrawler extends PluginForDecrypt {
      *
      * @throws Exception
      */
-    private ArrayList<DownloadLink> crawlProcessContentAPI(final Map<String, Object> postmap, final String service, final String creatorID, final String creatorName, final String contentType, final HashSet<String> dupes, final boolean useAdvancedDupecheck) throws Exception {
+    private ArrayList<DownloadLink> crawlProcessContentAPI(final Map<String, Object> postmap, final String service, final String creatorID, final String creatorName, final String contentType, final Set<String> dupes, final boolean useAdvancedDupecheck) throws Exception {
         final String postID = postmap.get("id").toString();
         final String posturl = "https://" + getHost() + "/creators/" + service + "/" + creatorID + "/" + contentType + "/" + postID;
         /* Every item has a "published" date (unix timestamp in seconds) */
@@ -392,9 +395,9 @@ public class CumStCrawler extends PluginForDecrypt {
                 numberofResultsSimpleCount++;
             }
         }
-        logger.info("service: " + service + " | CreatorID: " + creatorID + " | PostID: " + postID + " | Attachment items in API response: " + numberofResultsSimpleCount + " | Number of unique file items: " + directResults.size());
         final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
         final FilePackage postFilePackage = getFilePackageForContentCrawler(service, creatorID, creatorName, contentType, postID);
+        boolean skippedPostTextContent = false;
         if (!StringUtils.isEmpty(postTextContent)) {
             final TextCrawlMode mode = cfg.getTextCrawlMode();
             if (mode == TextCrawlMode.ALWAYS || (mode == TextCrawlMode.ONLY_IF_NO_MEDIA_ITEMS_ARE_FOUND && directResults.isEmpty())) {
@@ -408,27 +411,30 @@ public class CumStCrawler extends PluginForDecrypt {
                     ignore.printStackTrace();
                 }
                 directResults.add(textfile);
+            } else {
+                skippedPostTextContent = true;
             }
         }
+        int numberofHttpLinksFromPostContent = 0;
         if (cfg.isCrawlHttpLinksFromPostContent()) {
             /* Crawl external http links from the raw caption text. */
             if (!StringUtils.isEmpty(postTextContent)) {
                 final List<CrawledLink> postTextContentLinks = getCrawler().find(getLinkCrawlerGeneration(), getCurrentLink(), postTextContent, br.getURL(), false, false);
                 if (postTextContentLinks != null) {
+                    /* Dupe check for links found in post text content */
+                    final Set<String> postTextContentLinkDupes = new HashSet<String>();
                     for (final CrawledLink postTextContentLink : postTextContentLinks) {
                         final String linkURL = postTextContentLink.getURL();
-                        try {
-                            final URL url = new URL(linkURL);
-                            if (!dupes.add(url.getPath())) {
-                                continue;
-                            }
-                        } catch (final MalformedURLException e) {
-                            logger.log(e);
+                        if (!postTextContentLinkDupes.add(linkURL)) {
+                            /* Duplicate link found in post text content */
+                            continue;
                         }
                         ret.add(this.createDownloadlink(linkURL));
+                        numberofHttpLinksFromPostContent++;
                     }
                 }
             }
+            logger.info("service: " + service + " | CreatorID: " + creatorID + " | PostID: " + postID + " | Attachment items in API response: " + numberofResultsSimpleCount + " | Number of unique file items: " + directResults.size() + " | Number of http links from post content: " + numberofHttpLinksFromPostContent + " | skippedPostTextContent: " + skippedPostTextContent);
             /* Crawl resolved outbound links (post_link rows). */
             final List<Map<String, Object>> links = (List<Map<String, Object>>) postmap.get("links");
             if (links != null) {
@@ -454,7 +460,13 @@ public class CumStCrawler extends PluginForDecrypt {
                 result.setProperty(CumSt.PROPERTY_POST_TEXT, postTextContent);
             }
             if (publishedDateStr != null) {
-                result.setProperty(CumSt.PROPERTY_DATE, publishedDateStr);
+                if (publishedDateStr.matches("^\\d+$")) {
+                    result.setProperty(CumSt.PROPERTY_DATE_TS, publishedDateStr);
+                    final String isoDate = Instant.ofEpochSecond(Long.parseLong(publishedDateStr)).atZone(ZoneId.of("UTC")).toLocalDateTime().toString();
+                    result.setProperty(CumSt.PROPERTY_DATE, isoDate);
+                } else {
+                    result.setProperty(CumSt.PROPERTY_DATE, publishedDateStr);
+                }
             }
             result.setProperty(CumSt.PROPERTY_SERVICE, service);
             result.setProperty(CumSt.PROPERTY_CREATOR_ID, creatorID);
@@ -476,7 +488,7 @@ public class CumStCrawler extends PluginForDecrypt {
         return ret;
     }
 
-    private DownloadLink buildFileDownloadLinkAPI(final HashSet<String> dupes, final boolean advancedDupeCheck, final Map<String, Object> filemap, final int index) throws PluginException {
+    private DownloadLink buildFileDownloadLinkAPI(final Set<String> dupes, final boolean advancedDupeCheck, final Map<String, Object> filemap, final int index) throws PluginException {
         this.ensureInitHosterplugin();
         final Object storageKeyO = filemap.get("storageKey");
         if (storageKeyO == null) {
@@ -548,14 +560,13 @@ public class CumStCrawler extends PluginForDecrypt {
     }
 
     private static Map<String, String> ID_TO_CREATORNAME = new LinkedHashMap<String, String>() {
-        protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
-            return size() > 100;
-        };
-    };
+                                                             protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+                                                                 return size() > 100;
+                                                             };
+                                                         };
 
     /**
-     * Returns the creators' username for the given service + creatorID. </br>
-     * Uses API to find the username and caches the result. </br>
+     * Returns the creators' username for the given service + creatorID. </br> Uses API to find the username and caches the result. </br>
      * Returns null if it is unable to find the username.
      */
     private String findCreatorName(final String service, final String creatorID) throws Exception {

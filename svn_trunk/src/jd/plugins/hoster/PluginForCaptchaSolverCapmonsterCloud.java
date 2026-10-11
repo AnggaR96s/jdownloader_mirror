@@ -3,6 +3,7 @@ package jd.plugins.hoster;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.appwork.utils.DebugMode;
 import org.jdownloader.plugins.components.captchasolver.abstractPluginForCaptchaSolverTwoCaptchaAPIV2;
 import org.jdownloader.plugins.components.config.CaptchaSolverPluginConfigCapmonster;
 import org.jdownloader.plugins.controller.LazyPlugin;
@@ -11,16 +12,12 @@ import jd.PluginWrapper;
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 import jd.plugins.HostPlugin;
 
-@HostPlugin(revision = "$Revision: 52505 $", interfaceVersion = 3, names = { "capmonster.cloud" }, urls = { "" })
+@HostPlugin(revision = "$Revision: 53549 $", interfaceVersion = 3, names = { "capmonster.cloud" }, urls = { "" })
 public class PluginForCaptchaSolverCapmonsterCloud extends abstractPluginForCaptchaSolverTwoCaptchaAPIV2 {
     @Override
     public LazyPlugin.FEATURE[] getFeatures() {
         return new LazyPlugin.FEATURE[] { LazyPlugin.FEATURE.CAPTCHA_SOLVER, LazyPlugin.FEATURE.BUBBLE_NOTIFICATION, LazyPlugin.FEATURE.API_KEY_LOGIN };
     }
-    // public Object getFavIcon(final String host) throws IOException {
-    // // TODO: Fix missing fav-icon (missing due to Cloudflare blocking when accessing main page).
-    // return null;
-    // }
 
     public PluginForCaptchaSolverCapmonsterCloud(PluginWrapper wrapper) {
         super(wrapper);
@@ -37,15 +34,23 @@ public class PluginForCaptchaSolverCapmonsterCloud extends abstractPluginForCapt
         types.add(CAPTCHA_TYPE.IMAGE);
         types.add(CAPTCHA_TYPE.IMAGE_SINGLE_CLICK_CAPTCHA);
         types.add(CAPTCHA_TYPE.IMAGE_MULTI_CLICK_CAPTCHA);
-        // types.add(CAPTCHA_TYPE.RECAPTCHA_V3);
+        /* 2026-10-07: Works according to them but failed for me. */
+        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
+            types.add(CAPTCHA_TYPE.HCAPTCHA);
+        }
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2);
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2_ENTERPRISE);
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2_INVISIBLE);
-        // TODO: Check if they support this captcha type
-        // types.add(CAPTCHA_TYPE.HCAPTCHA);
-        // types.add(CAPTCHA_TYPE.KEY_CAPTCHA);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V3);
+        types.add(CAPTCHA_TYPE.RECAPTCHA_V3_ENTERPRISE);
         types.add(CAPTCHA_TYPE.CLOUDFLARE_TURNSTILE);
-        types.add(CAPTCHA_TYPE.MT_CAPTCHA);
+        /*
+         * 2026-09-24: capmonster.cloud's API does offer MtCaptchaTaskProxyless, but solve() (in
+         * abstractPluginForCaptchaSolverTwoCaptchaAPIV2) has no request handling for it yet, so it is NOT declared here. Declaring it
+         * without a matching solve() branch would make solve() throw for such a challenge. Re-add together with the corresponding solve()
+         * handling.
+         */
+        // types.add(CAPTCHA_TYPE.MT_CAPTCHA);
         return types;
     }
 
@@ -74,5 +79,11 @@ public class PluginForCaptchaSolverCapmonsterCloud extends abstractPluginForCapt
     @Override
     public Class<? extends CaptchaSolverPluginConfigCapmonster> getConfigInterface() {
         return CaptchaSolverPluginConfigCapmonster.class;
+    }
+
+    @Override
+    public long getServerSideMaxPollingTimeoutMillis() {
+        /* capmonster.cloud gives up on a submitted task server-side after 5 minutes. */
+        return 5 * 60 * 1000L;
     }
 }

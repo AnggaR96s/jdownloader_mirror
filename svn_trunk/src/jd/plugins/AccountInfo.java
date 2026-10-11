@@ -15,6 +15,7 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package jd.plugins;
 
+import java.text.NumberFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -113,12 +114,36 @@ public class AccountInfo extends Property implements AccountTrafficView {
     }
 
     public String getAccountBalanceFormatted() {
-        String balanceStr = String.format("%.3f", this.getAccountBalance());
-        final Currency currency = getCurrency();
+        return formatCaptchaSolverBalance(this.getAccountBalance(), getCurrency());
+    }
+
+    /**
+     * Central helper to format an account balance for display.
+     *
+     * The value is always rendered with exactly two fraction digits so that balances are shown consistently across the whole GUI (captcha
+     * solver status texts, account tables, ...). When a currency is given it is formatted as a localized currency amount, otherwise as a
+     * plain localized number.
+     *
+     * @param balance
+     *            the balance value to format
+     * @param currency
+     *            the currency of the balance, or {@code null} if unknown
+     * @return the balance formatted with exactly two fraction digits for currency and 0-2 fraction digits for no currency
+     */
+    public static String formatCaptchaSolverBalance(final double balance, final Currency currency) {
         if (currency != null) {
-            balanceStr += currency.getSymbol();
+            final NumberFormat nf = NumberFormat.getCurrencyInstance();
+            nf.setCurrency(currency);
+            nf.setMinimumFractionDigits(2);
+            nf.setMaximumFractionDigits(2);
+            return nf.format(balance);
+        } else {
+            /* No currency known: format as a plain number. */
+            final NumberFormat nf = NumberFormat.getNumberInstance();
+            nf.setMinimumFractionDigits(0);// credits often don't have fraction digits
+            nf.setMaximumFractionDigits(2);
+            return nf.format(balance) + " Credits";
         }
-        return balanceStr;
     }
 
     public void setCurrency(Currency currency) {
@@ -234,12 +259,16 @@ public class AccountInfo extends Property implements AccountTrafficView {
         return validUntil < System.currentTimeMillis();
     }
 
-    public void setAccountBalance(final double num) {
-        this.account_balance = Math.max(0, num);
+    public void setAccountBalance(final Double num) {
+        if (num == null) {
+            this.account_balance = -1;
+        } else {
+            this.account_balance = Math.max(0, num);
+        }
     }
 
-    public void setAccountBalance(double balance, Currency currency) {
-        this.account_balance = balance;
+    public void setAccountBalance(Double balance, Currency currency) {
+        setAccountBalance(balance);
         this.currency = currency;
     }
 

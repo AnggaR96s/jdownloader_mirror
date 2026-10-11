@@ -61,6 +61,7 @@ import org.appwork.uio.ConfirmDialogInterface;
 import org.appwork.uio.InputDialogInterface;
 import org.appwork.uio.UIOManager;
 import org.appwork.utils.Application;
+import org.appwork.utils.DebugMode;
 import org.appwork.utils.Exceptions;
 import org.appwork.utils.Files;
 import org.appwork.utils.Hash;
@@ -94,6 +95,8 @@ import org.jdownloader.captcha.blacklist.BlockDownloadCaptchasByHost;
 import org.jdownloader.captcha.blacklist.BlockDownloadCaptchasByLink;
 import org.jdownloader.captcha.blacklist.BlockDownloadCaptchasByPackage;
 import org.jdownloader.captcha.blacklist.CaptchaBlackList;
+import org.jdownloader.captcha.v2.CaptchaSolverCaptchaTypesSettingsPanelBuilder;
+import org.jdownloader.captcha.v2.CaptchaSolverCaptchaTypesSettingsPanelBuilder.AccountCaptchaTypeAccessor;
 import org.jdownloader.captcha.v2.Challenge;
 import org.jdownloader.captcha.v2.Challenge.CaptchaRequestType;
 import org.jdownloader.captcha.v2.ChallengeResponseController;
@@ -189,7 +192,6 @@ import jd.http.URLConnectionAdapter;
 import jd.nutils.Formatter;
 import jd.nutils.JDHash;
 import jd.plugins.Account.AccountError;
-import jd.plugins.CaptchaSolverAccountSettingsPanelBuilder.AccountCaptchaTypeAccessor;
 import jd.plugins.DownloadLink.AvailableStatus;
 import jd.plugins.MultiHostHost.MultihosterHostStatus;
 import jd.plugins.download.DownloadInterface;
@@ -775,12 +777,6 @@ public abstract class PluginForHost extends Plugin {
         return super.getLogger();
     }
 
-    @Override
-    @Deprecated
-    public SubConfiguration getPluginConfig() {
-        return SubConfiguration.getConfig(lazyP.getHost());
-    }
-
     protected PluginConfigPanelNG createConfigPanel() {
         boolean hasConfigPanel = getConfigInterface() != null;
         hasConfigPanel |= isPremiumEnabled() && getAccountConfigInterface(null) != null;
@@ -1206,7 +1202,8 @@ public abstract class PluginForHost extends Plugin {
             }
             if (!mhost.isUnlimitedTraffic()) {
                 /* Traffic limit exists -> Check if enough traffic is left. */
-                final long host_TrafficLeft = Math.max(0, mhost.getTrafficLeft());
+                /* Use the raw (possibly negative/overdrawn) value so the missing amount below includes the overdraft. */
+                final long host_TrafficLeft = mhost.getTrafficLeft();
                 if (trafficNeeded > host_TrafficLeft) {
                     /* Not enough individual file host traffic */
                     if (ai.isTrafficRefill()) {
@@ -1633,7 +1630,9 @@ public abstract class PluginForHost extends Plugin {
         progress.setProgressSource(this);
         progress.setDisplayInProgressColumnEnabled(false);
         try {
-            downloadLink.addPluginProgress(progress);
+            if (downloadLink != null) {
+                downloadLink.addPluginProgress(progress);
+            }
             while (i > 0 && !isAbort()) {
                 progress.setCurrent(i);
                 synchronized (this) {
@@ -1644,7 +1643,9 @@ public abstract class PluginForHost extends Plugin {
         } catch (final InterruptedException e) {
             throw new PluginException(LinkStatus.ERROR_RETRY, null, -1, e);
         } finally {
-            downloadLink.removePluginProgress(progress);
+            if (downloadLink != null) {
+                downloadLink.removePluginProgress(progress);
+            }
         }
         if (isAbort()) {
             throw new PluginException(LinkStatus.ERROR_RETRY);
@@ -2471,24 +2472,25 @@ public abstract class PluginForHost extends Plugin {
                         @Override
                         public void execute(DownloadSession currentSession) {
                             final SingleDownloadController con = downloadLink.getDownloadLinkController();
-                            if (con == null) {
-                                updateDownloadLink(checkableLink, url);
+                            final DownloadWatchDogJob updateDownloadLinkJob = new DownloadWatchDogJob() {
+                                @Override
+                                public void execute(DownloadSession currentSession) {
+                                    updateDownloadLink(checkableLink, url);
+                                }
+
+                                @Override
+                                public void interrupt() {
+                                }
+
+                                @Override
+                                public boolean isHighPriority() {
+                                    return false;
+                                }
+                            };
+                            if (con == null || !con.isAlive()) {
+                                updateDownloadLinkJob.execute(currentSession);
                             } else {
-                                con.getJobsAfterDetach().add(new DownloadWatchDogJob() {
-                                    @Override
-                                    public void execute(DownloadSession currentSession) {
-                                        updateDownloadLink(checkableLink, url);
-                                    }
-
-                                    @Override
-                                    public void interrupt() {
-                                    }
-
-                                    @Override
-                                    public boolean isHighPriority() {
-                                        return false;
-                                    }
-                                });
+                                con.getJobsAfterDetach().add(updateDownloadLinkJob);
                             }
                         }
                     });
@@ -2764,7 +2766,10 @@ public abstract class PluginForHost extends Plugin {
      */
     public void move(DownloadLink link, String currentDirectory, String currentName, String newDirectory, String newName) throws Exception {
         if (link.getView().getBytesLoaded() <= 0) {
-            // nothing to rename or move. there should not be any file, and if there is, it does not belong to the link
+            /*
+             * Nothing was downloaded for this link, so there is no file that belongs to it. Even if a file with that name happens to exist
+             * on disk, it is not ours to move or rename, so abort before touching the filesystem.
+             */
             return;
         }
         if (StringUtils.isEmpty(newName)) {
@@ -2773,6 +2778,11 @@ public abstract class PluginForHost extends Plugin {
         if (StringUtils.isEmpty(newDirectory)) {
             newDirectory = currentDirectory;
         }
+        /*
+         * Abort early if neither the directory nor the name actually change, because then there is nothing to move or rename. The
+         * comparison is case-insensitive on Windows (its filesystem is case-insensitive) and case-sensitive elsewhere, so that e.g. a pure
+         * letter-case change is still treated as a real rename on case-sensitive filesystems but as a no-op on Windows.
+         */
         if (CrossSystem.isWindows()) {
             if (StringUtils.equalsIgnoreCase(currentDirectory, newDirectory) && StringUtils.equalsIgnoreCase(currentName, newName)) {
                 return;
@@ -2821,10 +2831,13 @@ public abstract class PluginForHost extends Plugin {
 
     private void handle(ArrayList<ExceptionRunnable> revertList, final DownloadLink downloadLink, final MovePluginProgress progress, final File currentFile, final File newFile) throws FileExistsException, CouldNotRenameException, IOException {
         if (!currentFile.exists()) {
-            /* Do nothing */
+            /*
+             * The source file does not exist. This is normal: listFilePairsToMove returns multiple candidates (e.g. the .part file and the
+             * final file) and usually only one of them is actually present, so a missing source is simply skipped.
+             */
             return;
         } else if (currentFile.equals(newFile)) {
-            /* Do nothing */
+            /* Source and target are the very same file, so there is nothing to move or rename. */
             return;
         }
         progress.setFile(newFile);
@@ -2846,7 +2859,12 @@ public abstract class PluginForHost extends Plugin {
         try {
             getLogger().info("Move " + old + " to " + newFile);
             if (CrossSystem.isWindows() && Application.getJavaVersion() >= Application.JAVA17) {
-                java.nio.file.Files.move(java.nio.file.Paths.get(old.toURI()), java.nio.file.Paths.get(newFile.toURI()), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                /*
+                 * Use NIO on Windows because File.renameTo is unreliable there. toPath() is safe here because this branch only runs on Java
+                 * 1.7+. For a move within the same volume ATOMIC_MOVE is a pure metadata rename (no data copy); across volumes it throws
+                 * AtomicMoveNotSupportedException (an IOException) and we fall back to copyMove below.
+                 */
+                java.nio.file.Files.move(old.toPath(), newFile.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             } else if (!old.renameTo(newFile)) {
                 throw new CouldNotRenameException(old, newFile);
             }
@@ -2857,12 +2875,13 @@ public abstract class PluginForHost extends Plugin {
             getLogger().log(e);
             copyMove(progress, downloadLink, old, newFile);
         }
-        // TODO copy optimiz
+        /*
+         * The move itself is done at this point. If the file ended up in a different directory, try to remove the now possibly empty source
+         * directory - but never the configured default download folder. Dynamic tags in the default download directory are intentionally
+         * ignored here; File.delete() only succeeds on an empty directory, so a non-empty folder is left untouched anyway.
+         */
         if (!newFile.getParentFile().equals(old.getParentFile())) {
-            // check if we have to delete the old path;
             if (!old.getParentFile().equals(new File(CFG_GENERAL.DEFAULT_DOWNLOAD_FOLDER.getValue()))) {
-                // we ignore the dynamic tags here. if the default downloaddirectory contains dynamic tags, we can delete the folders
-                // anyaway if empty.
                 old.getParentFile().delete();
             }
         }
@@ -2870,9 +2889,41 @@ public abstract class PluginForHost extends Plugin {
 
     private void copyMove(final MovePluginProgress progress, final DownloadLink downloadLink, final File old, final File newFile) throws IOException {
         if (!old.exists() && newFile.exists()) {
+            /* Source already moved to target by the preceding rename; nothing left to copy. */
             return;
         } else if (!old.exists()) {
+            /* Neither source nor target exist: cannot complete the move. */
             throw new IOException("Cannot move " + old + " to " + newFile + ". The File does not exist!");
+        }
+        /*
+         * Fail fast if the destination partition cannot hold the whole file (only reachable on a cross-partition move). Reuse the shared
+         * DiskSpaceManager, not a raw File.getUsableSpace(), so the free-space-check toggle, forced-free buffer, other downloads'
+         * reservations and filesystem special cases are honoured, like DownloadLinkDownloadable.rename().
+         */
+        final long requiredSpace = old.length();
+        final DiskSpaceReservation reservation = new DiskSpaceReservation() {
+            @Override
+            public File getDestination() {
+                return newFile;
+            }
+
+            @Override
+            public long getSize() {
+                return requiredSpace;
+            }
+
+            @Override
+            public Object getOwner() {
+                return PluginForHost.this;
+            }
+
+            @Override
+            public LogInterface getLogger() {
+                return PluginForHost.this.getLogger();
+            }
+        };
+        if (DISKSPACERESERVATIONRESULT.FAILED.equals(DownloadWatchDog.getInstance().getSession().getDiskSpaceManager().check(reservation))) {
+            throw new IOException("Not enough free space to move " + old + " to " + newFile + ". Required: " + requiredSpace + " bytes");
         }
         // we did an file exists check earlier. so if the file exists here, the only reason is a failed rename/move;
         newFile.delete();
@@ -2960,8 +3011,6 @@ public abstract class PluginForHost extends Plugin {
                 }
             };
             thread.start();
-        } else {
-            // System.out.println("Do not show again " + JSonStorage.getPlainStorage("Dialogs").get(COPY_MOVE_FILE, -1));
         }
         try {
             IO.copyFile(new ProgressFeedback() {
@@ -3192,7 +3241,14 @@ public abstract class PluginForHost extends Plugin {
             /* Not a captcha solver plugin */
             return;
         }
-        new CaptchaSolverAccountSettingsPanelBuilder(new AccountCaptchaTypeAccessor(acc)).build(panel);
+        /*
+         * 2026-09-17: During development I decided that we do not need the ability to turn off single captcha types per account for now
+         * since in most cases, all solver accounts for one service do support all captcha types of this service.
+         */
+        final boolean allowDisplaySolverTypesTableAsAccountSetting = false;
+        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE && allowDisplaySolverTypesTableAsAccountSetting) {
+            new CaptchaSolverCaptchaTypesSettingsPanelBuilder(new AccountCaptchaTypeAccessor(acc)).build(panel);
+        }
     }
 
     public void extendAccountSettingsPanel(final Account acc, final PluginConfigPanelNG panel) {

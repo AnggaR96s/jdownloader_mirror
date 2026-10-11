@@ -1,17 +1,22 @@
 package org.jdownloader.captcha.v2.solver.gui;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.appwork.storage.config.JsonConfig;
+import org.jdownloader.captcha.v2.AbstractResponse;
 import org.jdownloader.captcha.v2.Challenge;
 import org.jdownloader.captcha.v2.challenge.multiclickcaptcha.MultiClickCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.multiclickcaptcha.MultiClickedPoint;
-import org.jdownloader.captcha.v2.challenge.stringcaptcha.MultiClickCaptchaResponse;
 import org.jdownloader.captcha.v2.solver.jac.JACSolver;
+import org.jdownloader.captcha.v2.solver.service.DialogSolverService;
 import org.jdownloader.captcha.v2.solverjob.SolverJob;
 import org.jdownloader.settings.advanced.AdvancedConfigManager;
 
 import jd.controlling.captcha.CaptchaSettings;
 import jd.controlling.captcha.MultiClickCaptchaDialogHandler;
 import jd.controlling.captcha.SkipException;
+import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 
 public class DialogMultiClickCaptchaSolver extends AbstractDialogSolver<MultiClickedPoint> {
     private CaptchaSettings                config;
@@ -20,13 +25,21 @@ public class DialogMultiClickCaptchaSolver extends AbstractDialogSolver<MultiCli
     private DialogMultiClickCaptchaSolver() {
         super(1);
         config = JsonConfig.create(CaptchaSettings.class);
-        AdvancedConfigManager.getInstance().register(JsonConfig.create(DialogCaptchaSolverConfig.class));
+        AdvancedConfigManager.getInstance().register(DialogSolverService.getInstance().getConfigV3());
     }
 
     private static final DialogMultiClickCaptchaSolver INSTANCE = new DialogMultiClickCaptchaSolver();
 
     public static DialogMultiClickCaptchaSolver getInstance() {
         return INSTANCE;
+    }
+
+    @Override
+    public List<CAPTCHA_TYPE> getSupportedCaptchaTypes() {
+        final List<CAPTCHA_TYPE> types = new ArrayList<CAPTCHA_TYPE>();
+        types.add(CAPTCHA_TYPE.IMAGE_SINGLE_CLICK_CAPTCHA);
+        types.add(CAPTCHA_TYPE.IMAGE_MULTI_CLICK_CAPTCHA);
+        return types;
     }
 
     @Override
@@ -63,7 +76,7 @@ public class DialogMultiClickCaptchaSolver extends AbstractDialogSolver<MultiCli
                 handler.run();
                 final MultiClickedPoint result = handler.getResult();
                 if (result != null) {
-                    solverJob.addAnswer(new MultiClickCaptchaResponse(captchaChallenge, this, result));
+                    solverJob.addAnswer(new AbstractResponse<MultiClickedPoint>(captchaChallenge, this, result));
                 }
             }
         }

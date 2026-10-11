@@ -2,6 +2,9 @@ package org.appwork.swing.exttable.columns;
 
 import java.text.NumberFormat;
 import java.util.Currency;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 import javax.swing.JComponent;
 
@@ -12,9 +15,10 @@ import org.appwork.utils.DebugMode;
 import org.appwork.utils.swing.renderer.RenderLabel;
 
 public abstract class ExtCurrencyColumn<E> extends ExtColumn<E> {
-    private static final long serialVersionUID = 3468695684952592990L;
-    private final RenderLabel renderer;
-    private NumberFormat      formatter;
+    private static final long                 serialVersionUID = 3468695684952592990L;
+    private final RenderLabel                 renderer;
+    private NumberFormat                      formatter;
+    private final Map<Currency, NumberFormat> formatterMap     = new HashMap<Currency, NumberFormat>();
 
     public ExtCurrencyColumn(final String name, final ExtTableModel<E> table) {
         super(name, table);
@@ -35,9 +39,25 @@ public abstract class ExtCurrencyColumn<E> extends ExtColumn<E> {
         });
     }
 
+    abstract protected Currency getCurrency(E value);
+
     @Override
     protected NumberFormat getDefaultNumberFormat() {
         return NumberFormat.getCurrencyInstance();
+    }
+
+    protected NumberFormat getCurrencyFormatter(E value) {
+        final Currency currency = getCurrency(value);
+        if (currency == null) {
+            return formatter;
+        }
+        NumberFormat formatter = formatterMap.get(currency);
+        if (formatter == null) {
+            formatter = NumberFormat.getCurrencyInstance(Locale.getDefault());
+            formatter.setCurrency(currency);
+            formatterMap.put(currency, formatter);
+        }
+        return formatter;
     }
 
     @Override
@@ -45,16 +65,9 @@ public abstract class ExtCurrencyColumn<E> extends ExtColumn<E> {
         return formatter = super.updateNumberFormat();
     }
 
-    abstract protected Currency getCurrency(E value);
-
     protected String getText(final E value) {
         try {
-            final Currency currency = getCurrency(value);
-            final NumberFormat fmt = (NumberFormat) this.formatter.clone();
-            if (currency != null) {
-                fmt.setCurrency(currency);
-            }
-            return fmt.format(this.getValue(value) / 100.0f);
+            return getCurrencyFormatter(value).format(getCurrencyValue(value));
         } catch (final Exception e) {
             DebugMode.debugger();
             return e.getMessage();
@@ -69,6 +82,13 @@ public abstract class ExtCurrencyColumn<E> extends ExtColumn<E> {
     @Override
     public Object getCellEditorValue() {
         return null;
+    }
+
+    protected double getCurrencyValue(E value) {
+        /*
+         * getValue returns the amount in cents, so divide by 100 to get the actual monetary amount.
+         */
+        return this.getValue(value) / 100.0d;
     }
 
     abstract protected long getValue(E o);

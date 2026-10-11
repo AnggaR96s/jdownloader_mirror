@@ -8,19 +8,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import jd.PluginWrapper;
-import jd.http.Browser;
-import jd.http.Request;
-import jd.http.requests.FormData;
-import jd.http.requests.PostFormDataRequest;
-import jd.plugins.Account;
-import jd.plugins.AccountInfo;
-import jd.plugins.AccountInvalidException;
-import jd.plugins.CaptchaType.CAPTCHA_TYPE;
-import jd.plugins.HostPlugin;
-import jd.plugins.LinkStatus;
-import jd.plugins.PluginException;
-
 import org.appwork.storage.JSonStorage;
 import org.appwork.storage.TypeRef;
 import org.appwork.utils.ImageProvider.ImageProvider;
@@ -37,11 +24,26 @@ import org.jdownloader.captcha.v2.challenge.stringcaptcha.CaptchaResponse;
 import org.jdownloader.captcha.v2.challenge.stringcaptcha.ImageCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.stringcaptcha.TokenCaptchaResponse;
 import org.jdownloader.captcha.v2.solver.CESSolverJob;
+import org.jdownloader.gui.translate._GUI;
 import org.jdownloader.plugins.components.captchasolver.abstractPluginForCaptchaSolver;
 import org.jdownloader.plugins.components.config.CaptchaSolverPluginConfigCheapcaptchaCom;
 import org.jdownloader.plugins.controller.LazyPlugin;
 
-@HostPlugin(revision = "$Revision: 52716 $", interfaceVersion = 3, names = { "cheapcaptcha.com" }, urls = { "" })
+import jd.PluginWrapper;
+import jd.http.Browser;
+import jd.http.Request;
+import jd.http.requests.FormData;
+import jd.http.requests.PostFormDataRequest;
+import jd.plugins.Account;
+import jd.plugins.AccountInfo;
+import jd.plugins.AccountInvalidException;
+import jd.plugins.AccountUnavailableException;
+import jd.plugins.CaptchaType.CAPTCHA_TYPE;
+import jd.plugins.HostPlugin;
+import jd.plugins.LinkStatus;
+import jd.plugins.PluginException;
+
+@HostPlugin(revision = "$Revision: 53549 $", interfaceVersion = 3, names = { "cheapcaptcha.com" }, urls = { "" })
 public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCaptchaSolver {
     @Override
     public LazyPlugin.FEATURE[] getFeatures() {
@@ -57,7 +59,13 @@ public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCapt
         final Browser br = super.createNewBrowserInstance();
         br.getHeaders().put("Accept", "application/json");
         br.getHeaders().put("User-Agent", "JDownloader");
-        br.setAllowedResponseCodes(200, 400);
+        /*
+         * cheapcaptcha.com is a DeathByCaptcha-compatible API (see https://deathbycaptcha.com/api#api_details): 403 = credentials
+         * rejected OR insufficient credits, 400 = malformed request/invalid captcha, 500 = internal error, 503 = service overloaded. All
+         * of these still return a normal JSON body (status + error fields), so they must be allowed here and classified by HTTP code in
+         * callAPI(), not treated as a transport error.
+         */
+        br.setAllowedResponseCodes(200, 400, 403, 500, 503);
         br.setFollowRedirects(true);
         return br;
     }
@@ -111,18 +119,16 @@ public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCapt
         final Double creditsInDollar = creditsInDollarCent / 100;
         final AccountInfo ai = new AccountInfo();
         ai.setAccountBalance(creditsInDollar, Currency.getInstance("USD"));
-        ai.setStatus("Balance: " + ai.getAccountBalanceFormatted() + " | Rate: " + entries.get("rate"));
+        /* The balance part is translated, the rate is specific to this service and stays untranslated. */
+        ai.setStatus(_GUI.T.CaptchaSolverAccount_balance(ai.getAccountBalanceFormatted()) + " | Rate: " + entries.get("rate"));
         return ai;
     }
 
     @Override
     public void solve(CESSolverJob<?> job, Account account) throws Exception {
         final Challenge<?> challenge = job.getChallenge();
-        // TODO
-        // job.showBubble(this);
+        challenge.sendStatsSolving(job.getSolver());
         try {
-            // TODO
-            // challenge.sendStatsSolving(this);
             job.setStatus(SolverStatus.UPLOADING);
             final PostFormDataRequest r = new PostFormDataRequest(getApiBase() + "/captcha");
             final String username = account.getUser();
@@ -190,39 +196,37 @@ public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCapt
                 throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Failed to upload captcha");
             }
             job.setStatus(SolverStatus.SOLVING);
-            long startTime = System.currentTimeMillis();
-            Map<String, Object> pollresp = null;
+            String solution = null;
             while (true) {
-                this.sleep(this.getPollingIntervalMillis(account), null);
+                waitDuringPolling(job.getChallenge(), account);
                 br.getPage(getApiBase() + "/captcha/" + captchaID);
-                pollresp = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
-                final int status = ((Number) pollresp.get("status")).intValue();
-                final boolean is_correct = ((Boolean) pollresp.get("is_correct")).booleanValue();
-                if (is_correct) {
+                final Map<String, Object> pollresp = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
+                /*
+                 * cheapcaptcha.com is a DeathByCaptcha-compatible API: is_correct=1 both while processing AND when solved correctly, and
+                 * only turns 0 for an incorrect solution. Completion is therefore detected by a non-empty "text" (the answer); while still
+                 * being solved "text" is empty, "?" signals an incorrect solution.
+                 */
+                if (!isApiTrue(pollresp.get("is_correct"))) {
+                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solution incorrect");
+                }
+                final String text = (String) pollresp.get("text");
+                if (text != null && text.length() > 0 && !text.equals("?")) {
+                    solution = text;
                     break;
                 }
-                if (status == 255) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solution incorrect");
-                } else if (status != 0) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solve error: status " + status);
-                } else if (System.currentTimeMillis() - startTime > 60 * 60 * 1000) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solve timeout");
-                }
             }
-            final String solution = (String) pollresp.get("text");
             job.getLogger().info("CAPTCHA(" + type + ") solved: " + solution);
             AbstractResponse resp = null;
             if (challenge instanceof RecaptchaV2Challenge || challenge instanceof HCaptchaChallenge || challenge instanceof CloudflareTurnstileChallenge || challenge instanceof CutCaptchaChallenge) {
-                resp = new TokenCaptchaResponse((Challenge<String>) challenge, this, solution);
+                resp = new TokenCaptchaResponse((Challenge<String>) challenge, job.getSolver(), solution);
             } else {
-                resp = new CaptchaResponse((Challenge<String>) challenge, this, solution);
+                resp = new CaptchaResponse((Challenge<String>) challenge, job.getSolver(), solution);
             }
             resp.setCaptchaSolverTaskID(Integer.toString(captchaID));
             job.setAnswer(resp);
             return;
         } catch (Exception e) {
-            // TODO
-            // challenge.sendStatsError(this, e);
+            challenge.sendStatsError(job.getSolver(), e);
             throw e;
         }
     }
@@ -241,6 +245,18 @@ public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCapt
         }
     }
 
+    /** Interprets an API flag that may be a JSON boolean or a numeric/string 1/0 as a boolean. */
+    private static boolean isApiTrue(final Object value) {
+        if (value instanceof Boolean) {
+            return ((Boolean) value).booleanValue();
+        } else if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        } else if (value instanceof String) {
+            return "1".equals(value) || "true".equalsIgnoreCase((String) value);
+        }
+        return false;
+    }
+
     private Map<String, Object> callAPI(final Request req) throws IOException, PluginException {
         br.getPage(req);
         final Map<String, Object> entries = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
@@ -256,7 +272,20 @@ public class PluginForCaptchaSolverCheapcaptchaCom extends abstractPluginForCapt
         if (error == null) {
             return entries;
         }
-        throw new AccountInvalidException(error);
+        /*
+         * Docs: https://deathbycaptcha.com/api#api_details -- the JSON body alone (status/error) does not distinguish an account problem
+         * from a captcha problem, only the HTTP response code does: 403 = credentials rejected or insufficient credits (account,
+         * permanent), 400 = malformed request or invalid captcha image (captcha-level, not account), 503 = service overloaded
+         * (temporary), 500/other = internal server error (not the account's fault).
+         */
+        final int responseCode = br.getHttpConnection().getResponseCode();
+        if (responseCode == 403) {
+            throw new AccountInvalidException(error);
+        } else if (responseCode == 503) {
+            throw new AccountUnavailableException(error, 60 * 1000L);
+        } else {
+            throw new PluginException(LinkStatus.ERROR_CAPTCHA, error);
+        }
     }
 
     @Override

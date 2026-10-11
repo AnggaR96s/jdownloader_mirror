@@ -45,12 +45,13 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import org.appwork.storage.config.annotations.DefaultEnumArrayValue;
 import org.appwork.storage.config.annotations.DefaultOnNull;
 import org.appwork.utils.DebugMode;
+import org.appwork.utils.ReflectionUtils;
 
 /**
  * @author Thomas
  *
  */
-public class EnumSetKeyHandler extends ObjectKeyHandler {
+public class EnumSetKeyHandler<T extends Enum<T>> extends ObjectKeyHandler<Set<T>> {
     public EnumSetKeyHandler(StorageHandler<?> storageHandler, String key, Type type) {
         super(storageHandler, key, type);
     }
@@ -60,11 +61,20 @@ public class EnumSetKeyHandler extends ObjectKeyHandler {
         return DefaultEnumArrayValue.class;
     }
 
+    public Set<T> newSetInstance() throws InstantiationException, IllegalAccessException {
+        Class raw = ReflectionUtils.getRaw(getTypeRef().getType());
+        if (raw.isInterface()) {
+            raw = CopyOnWriteArraySet.class;
+        }
+        final Set<T> value = (Set<T>) raw.newInstance();
+        return value;
+    }
+
     @Override
     protected void initDefaults() throws Throwable {
         final DefaultEnumArrayValue ann = this.getAnnotation(DefaultEnumArrayValue.class);
         if (ann != null) {
-            final List<Enum<?>> ret = new ArrayList<Enum<?>>();
+            final List<T> ret = new ArrayList<T>();
             for (final String value : ann.value()) {
                 try {
                     final int index = value.lastIndexOf(".");
@@ -73,24 +83,27 @@ public class EnumSetKeyHandler extends ObjectKeyHandler {
                     if (index == -1) {
                         name = value;
                         final ParameterizedType type = (ParameterizedType) getRawType();
-                        clazz = ((Class) type.getActualTypeArguments()[0]).getName();
+                        clazz = ((Class<T>) type.getActualTypeArguments()[0]).getName();
                     } else {
                         name = value.substring(index + 1);
                         clazz = value.substring(0, index);
                     }
-                    ret.add(Enum.valueOf((Class<Enum>) Class.forName(clazz), name));
+                    ret.add(Enum.valueOf((Class<T>) Class.forName(clazz), name));
                 } catch (Exception e) {
                     DebugMode.debugger(e);
                 }
             }
-            this.setDefaultValue(new CopyOnWriteArraySet<Enum<?>>(ret));
+            final Set<T> defaultValueSet = newSetInstance();
+            defaultValueSet.addAll(ret);
+            this.setDefaultValue(defaultValueSet);
             return;
         }
         if (getAnnotation(DefaultOnNull.class) != null) {
             final ParameterizedType type = (ParameterizedType) getRawType();
-            final Class enumClass = (Class) type.getActualTypeArguments()[0];
-            final Set<Object> defaultValue = new CopyOnWriteArraySet<Object>(Arrays.asList(enumClass.getEnumConstants()));
-            this.setDefaultValue(defaultValue);
+            final Set<T> defaultValueSet = newSetInstance();
+            final Class<T> enumClass = (Class<T>) type.getActualTypeArguments()[0];
+            defaultValueSet.addAll(Arrays.asList(enumClass.getEnumConstants()));
+            this.setDefaultValue(defaultValueSet);
             return;
         }
         this.setDefaultValue(null);

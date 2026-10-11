@@ -16,17 +16,28 @@ import org.jdownloader.images.NewTheme;
 import org.jdownloader.settings.staticreferences.CFG_CAPTCHA;
 
 public class CESSolverJob<T> {
-    private final SolverJob<T>    job;
-    private volatile SolverStatus status;
-    private CESBubble             bubble;
-    private volatile boolean      answered;
+    private final SolverJob<T>       job;
+    private final ChallengeSolver<T> solver;
+    private volatile SolverStatus    status;
+    private CESBubble                bubble;
+    private volatile boolean         answered;
 
     public SolverJob<T> getJob() {
         return job;
     }
 
-    public CESSolverJob(SolverJob<T> job) {
+    /**
+     * The {@link ChallengeSolver} (e.g. a {@code PluginChallengeSolver}) that owns this job. Plugin solvers must attribute the
+     * {@link AbstractResponse} they build to this instance (not to themselves) so that {@code AbstractResponse#setValidation} can find a real
+     * {@link ChallengeSolver} and actually deliver setValid()/setInvalid()/setUnused() feedback.
+     */
+    public ChallengeSolver<T> getSolver() {
+        return solver;
+    }
+
+    public CESSolverJob(SolverJob<T> job, ChallengeSolver<T> solver) {
         this.job = job;
+        this.solver = solver;
     }
 
     public Challenge<T> getChallenge() {
@@ -56,15 +67,46 @@ public class CESSolverJob<T> {
         }
     }
 
-    public void showBubble(CESChallengeSolver<T> cbSolver) throws InterruptedException {
-        if (!org.appwork.utils.Application.isHeadless()) {
-            showBubble(cbSolver, CFG_CAPTCHA.CFG.getCaptchaExchangeChanceToSkipBubbleTimeout());
+    public void showBubble() throws InterruptedException {
+        if (org.appwork.utils.Application.isHeadless()) {
+            /* No GUI -> no bubble. */
+        } else if (hasManualSolver()) {
+            showBubble(CFG_CAPTCHA.CFG.getExternalCaptchaSolverChanceToAbortExternalCaptchaSolver());
+        } else if (CESBubbleSupport.getInstance().isEnabled()) {
+            /*
+             * The bubble delays the upload to give the user a chance to solve the captcha manually or to abort the upload. Without a manual
+             * solver that delay is pointless -> send the captcha right away.
+             */
+            getLogger().info("Bubble is enabled but not shown: no manual solver available for this challenge, not delaying the captcha upload to " + solver + " | Solvers: " + job.getSolverList());
         }
     }
 
-    public void showBubble(CESChallengeSolver<T> cbSolver, int timeout) throws InterruptedException {
+    /**
+     * True if the job has a solver that is still working on the challenge and requires a human: dialog, browser or remote API (e.g. MyJD)
+     * solver. Automatic local solvers and external solvers do not count.
+     */
+    private boolean hasManualSolver() {
+        for (final ChallengeSolver<T> other : job.getSolverList()) {
+            if (job.isDone(other)) {
+                continue;
+            }
+            switch (other.getSolverType()) {
+            case JD_LOCAL_DIALOG:
+            case JD_LOCAL_BROWSER:
+            case JD_REMOTE_API:
+                return true;
+            case JD_LOCAL:
+            case EXTERNAL:
+            default:
+                break;
+            }
+        }
+        return false;
+    }
+
+    public void showBubble(int timeout) throws InterruptedException {
         if (!org.appwork.utils.Application.isHeadless()) {
-            bubble = CESBubbleSupport.getInstance().show(cbSolver, this, timeout);
+            bubble = CESBubbleSupport.getInstance().show(solver, this, timeout);
         }
     }
 

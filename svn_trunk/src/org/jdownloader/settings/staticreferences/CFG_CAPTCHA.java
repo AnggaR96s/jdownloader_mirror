@@ -30,10 +30,10 @@ public class CFG_CAPTCHA {
      **/
     public static final BooleanKeyHandler               DIALOG_COUNTDOWN_FOR_DOWNLOADS_ENABLED         = SH.getKeyHandler("DialogCountdownForDownloadsEnabled", BooleanKeyHandler.class);
     /**
-     * If the CES Bubble Support is enable, the bubble gives the user a chance to cancel the CES usage. This is the timeout for this skip
+     * If the notifications for external captcha solvers are enabled, the notification gives the user a chance to cancel the usage of the external captcha solver. This is the timeout for this skip
      * option
      **/
-    public static final IntegerKeyHandler               CAPTCHA_EXCHANGE_CHANCE_TO_SKIP_BUBBLE_TIMEOUT = SH.getKeyHandler("CaptchaExchangeChanceToSkipBubbleTimeout", IntegerKeyHandler.class);
+    public static final IntegerKeyHandler               EXTERNAL_CAPTCHA_SOLVER_CHANCE_TO_ABORT_EXTERNAL_CAPTCHA_SOLVER = SH.getKeyHandler("ExternalCaptchaSolverChanceToAbortExternalCaptchaSolver", IntegerKeyHandler.class);
     /**
      * True to enable a countdown in crawler captcha dialogs. Dialog will close automated after the coundown
      **/
@@ -50,4 +50,9 @@ public class CFG_CAPTCHA {
      * MS to wait until captcha dialog gets answered. Close dialog after this timeout unanswered
      **/
     public static final IntegerKeyHandler               CAPTCHA_DIALOG_DEFAULT_COUNTDOWN               = SH.getKeyHandler("CaptchaDialogDefaultCountdown2", IntegerKeyHandler.class);
+    /**
+     * Affects login captchas only: If a login captcha is required and at least one manual captcha solver is available, only manual
+     * captcha solvers will be allowed to solve this login captcha.
+     **/
+    public static final BooleanKeyHandler                AVOID_AUTO_SOLVER_FOR_LOGIN_CAPTCHAS           = SH.getKeyHandler("AvoidAutoSolverForLoginCaptchas", BooleanKeyHandler.class);
 }

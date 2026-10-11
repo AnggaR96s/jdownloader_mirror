@@ -4,24 +4,29 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.appwork.exceptions.WTFException;
-import org.appwork.utils.DebugMode;
+import org.appwork.utils.formatter.TimeFormatter;
+import org.appwork.utils.logging2.LogInterface;
 import org.jdownloader.captcha.v2.AbstractResponse;
-import org.jdownloader.captcha.v2.CaptchaChallengeFilter;
+import org.jdownloader.captcha.v2.CaptchaSolverCaptchaTypesSettingsPanelBuilder.AccountCaptchaTypeAccessor;
+import org.jdownloader.captcha.v2.CaptchaSolverConfigV3;
 import org.jdownloader.captcha.v2.Challenge;
+import org.jdownloader.captcha.v2.ChallengeSolver;
 import org.jdownloader.captcha.v2.ChallengeSolver.ChallengeVetoReason;
 import org.jdownloader.captcha.v2.ChallengeSolver.FeedbackType;
+import org.jdownloader.captcha.v2.JobRunnable;
 import org.jdownloader.captcha.v2.PluginChallengeSolver;
 import org.jdownloader.captcha.v2.solver.CESSolverJob;
 import org.jdownloader.plugins.components.config.CaptchaSolverPluginConfig;
 import org.jdownloader.plugins.controller.LazyPlugin;
 
 import jd.PluginWrapper;
+import jd.http.Browser;
 import jd.plugins.Account;
 import jd.plugins.AccountInfo;
-import jd.plugins.CaptchaSolverAccountSettingsPanelBuilder.AccountCaptchaTypeAccessor;
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 import jd.plugins.DownloadLink;
 import jd.plugins.DownloadLink.AvailableStatus;
+import jd.plugins.Plugin;
 import jd.plugins.PluginForHost;
 
 /**
@@ -30,7 +35,22 @@ import jd.plugins.PluginForHost;
 public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
     public <T> PluginChallengeSolver<T> getPluginChallengeSolver(final Challenge<T> c, final Account account) throws Exception {
         final abstractPluginForCaptchaSolver plugin = getNewPluginInstance(getLazyP());
-        plugin.setBrowser(plugin.createNewBrowserInstance());
+        /*
+         * Use the logger of the plugin that triggered the challenge (e.g. the hoster/crawler plugin) if available, so solver requests show
+         * up next to the download/crawl that caused them; fall back to this solver's own logger otherwise. Debug/verbose are always enabled
+         * here so solver browser requests actually get logged (mirrors the old CESChallengeSolver#createNewBrowserInstance behavior).
+         */
+        final Plugin challengePlugin = c != null ? c.getPlugin() : null;
+        LogInterface logger = challengePlugin != null ? challengePlugin.getLogger() : null;
+        if (logger == null) {
+            logger = plugin.getLogger();
+        }
+        plugin.setLogger(logger);
+        final Browser br = plugin.createNewBrowserInstance();
+        br.setLogger(logger);
+        br.setDebug(true);
+        br.setVerbose(true);
+        plugin.setBrowser(br);
         return new PluginChallengeSolver<T>(plugin, account);
     }
 
@@ -42,10 +62,8 @@ public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
      */
     public abstractPluginForCaptchaSolver(PluginWrapper wrapper) {
         super(wrapper);
-        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
-            /* All captcha solver plugins have account support. */
-            this.enablePremium(getBuyPremiumUrl());
-        }
+        /* All captcha solver plugins have account support. */
+        this.enablePremium(getBuyPremiumUrl());
     }
 
     /**
@@ -69,11 +87,19 @@ public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
      */
     public abstract List<CAPTCHA_TYPE> getSupportedCaptchaTypes();
 
-    /** Returns list of captcha types supported by this account. */
+    /**
+     * Returns list of captcha types supported by this account. <br>
+     * Most solvers support all captcha types for all account types, only some (e.g. captchas.io) may support some captcha types only for
+     * specific / more expensive account types.
+     */
     public List<CAPTCHA_TYPE> getSupportedCaptchaTypes(final Account account) {
         return getSupportedCaptchaTypes();
     }
 
+    /**
+     * This can be used so that a plugin can provide this information in advance so that e.g. users can lookup this info in a comparison
+     * table aka "Does this solver allow for response-feedback"?
+     */
     public List<FeedbackType> getSupportedFeedbackTypes() {
         return null;
     }
@@ -131,68 +157,46 @@ public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
     }
 
     public boolean isEnableCaptchaFeedback(final Account account) {
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return true;
-        }
-        return cfg.isEnableCaptchaFeedback();
+        return getDefaultConfig().isEnableCaptchaFeedback();
     }
 
     /**
-     * Determines whether the user should be notified when the account balance is low.
-     *
-     * @return true if the user should be notified on low balance, false otherwise
+     * Returns interval used for polling when waiting for captcha solution from solver: the user's configured polling interval, but never
+     * shorter than the minimum the service itself requires ({@link #getServerSideMinPollingIntervalMillis()}).
      */
-    public boolean notifyOnLowBalance(final Account account) {
-        // TODO: Implement logic
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return true;
-        }
-        return cfg.isWarnOnLowCredits();
-    }
-
-    /** Returns interval used for polling when waiting for captcha solution from solver. */
     public int getPollingIntervalMillis(final Account account) {
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return 5000;
-        }
-        return cfg.getPollingIntervalSeconds() * 1000;
+        return (int) Math.max(getDefaultConfig().getPollingIntervalSeconds() * 1000, getServerSideMinPollingIntervalMillis());
     }
 
-    public int getMaxSimultaneousCaptchas(final Account account) {
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return Integer.MAX_VALUE;
-        }
-        return cfg.getMaxSimultaneousCaptchas();
+    /**
+     * Returns the minimum time in milliseconds this solver service itself wants between two polling requests (e.g. documented rate limit or
+     * recommended polling interval of the service's API). The user's polling interval setting cannot go below this value, see
+     * {@link #getPollingIntervalMillis(Account)}. This is a property of the remote service, not a user setting. <br>
+     * 0 = no minimum (default, no minimum documented for this service).
+     */
+    public long getServerSideMinPollingIntervalMillis() {
+        return 0;
     }
 
-    public boolean isFilterListEnabled() {
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return true;
-        }
-        return cfg.isFilterListEnabled();
+    /**
+     * Returns the maximum number of captchas this solver service itself allows to be solved simultaneously <b>per account</b>, as enforced
+     * server-side by the service (not to be confused with the user's own local JDownloader setting, which applies to the solver as a whole:
+     * {@link CaptchaSolverConfigV3#getMaxSimultaneousCaptchas()}). May depend on the given account (e.g. plan/tier-based limits), but does
+     * not have to. <br>
+     * {@link Integer#MAX_VALUE} = unlimited/unknown (default, no server-side limit documented for this service).
+     */
+    public int getServerSideMaxSimultaneousCaptchaThreadsLimit(final Account account) {
+        return Integer.MAX_VALUE;
     }
 
-    public List<CaptchaChallengeFilter> getCaptchaChallengeFilterList() {
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return null;
-        }
-        return cfg.getFilterList();
-    }
-
-    /** Returns interval used for polling when waiting for captcha solution from solver. */
-    public int getMaxCaptchasPerHour(final Account account) {
-        // TODO: Implement functionality
-        final CaptchaSolverPluginConfig cfg = getDefaultConfig();
-        if (cfg == null) {
-            return 1000;
-        }
-        return cfg.getMaxCaptchasPerHour();
+    /**
+     * Returns the maximum time in milliseconds this solver service itself keeps polling a submitted task available/pollable before giving
+     * up on it server-side (e.g. the task result expires and further status checks will fail). This is a property of the remote service,
+     * not a user setting. <br>
+     * {@link Long#MAX_VALUE} = unlimited/unknown (default, no server-side polling timeout documented for this service).
+     */
+    public long getServerSideMaxPollingTimeoutMillis() {
+        return Long.MAX_VALUE;
     }
 
     /**
@@ -217,7 +221,45 @@ public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
     }
 
     /**
+     * Waits between two consecutive polling attempts while waiting for a captcha solution to become available. Subclasses must call this
+     * inside their polling loop instead of sleeping themselves, right before each polling request. <br>
+     * Does not enforce {@link #getServerSideMaxPollingTimeoutMillis()} itself: that limit already flows into
+     * {@link PluginChallengeSolver#getTimeoutMillis()} / {@link ChallengeSolver#getFinalTimeoutMillis()}, which arms a timer in
+     * {@link JobRunnable} that kills (interrupts) this solver once it is exceeded -- checked here via the plain
+     * {@link InterruptedException} below, no separate timeout tracking needed. <br>
+     * Sleeps in at most 1 second chunks (mirrors {@link jd.plugins.PluginForHost#sleep(long, jd.plugins.DownloadLink)}) instead of one long
+     * {@link Thread#sleep(long)}, so an interrupt is noticed within a second instead of only after the full polling interval. <br>
+     * Logs the approximate polling attempt number (derived from elapsed time / interval, no extra counter state needed), the total elapsed
+     * time and the configured polling interval.
+     */
+    protected void waitDuringPolling(final Challenge<?> challenge, final Account account) throws InterruptedException {
+        checkInterruption();
+        final long intervalMillis = getPollingIntervalMillis(account);
+        final long elapsedMillis = System.currentTimeMillis() - challenge.getCreated();
+        final long approximateAttempt = intervalMillis > 0 ? elapsedMillis / intervalMillis + 1 : 1;
+        final long maxMillis = new PluginChallengeSolver<Object>(this, account).getFinalTimeoutMillis();
+        final StringBuilder sb = new StringBuilder();
+        sb.append("Captcha polling attempt #").append(approximateAttempt);
+        sb.append(", elapsed ").append(TimeFormatter.formatMilliSeconds(elapsedMillis, 0));
+        if (maxMillis > 0) {
+            sb.append(" of max ").append(TimeFormatter.formatMilliSeconds(maxMillis, 0));
+            sb.append(" (").append(Math.min(100, elapsedMillis * 100 / maxMillis)).append("%)");
+        }
+        sb.append(", interval ").append(TimeFormatter.formatMilliSeconds(intervalMillis, 0));
+        getLogger().info(sb.toString());
+        long remainingMillis = intervalMillis;
+        while (remainingMillis > 0) {
+            Thread.sleep(Math.min(1000L, remainingMillis));
+            remainingMillis -= 1000L;
+            checkInterruption();
+        }
+    }
+
+    /**
      * Returns false if the solver does not have enough balance to solve the given captcha challenge. <br>
+     * In theory if we know how much a challenge would cost for the current solver, plugins cloud override this and place individual checks.
+     * <br>
+     * In reality this is a small detail which we can often ignore.
      */
     public boolean enoughBalanceFor(final Challenge<?> c, final Account account) {
         if (account.getAccountInfo() != null && account.getAccountInfo().getAccountBalance() <= 0) {
@@ -242,7 +284,8 @@ public abstract class abstractPluginForCaptchaSolver extends PluginForHost {
         return CaptchaSolverPluginConfig.class;
     }
 
-    private CaptchaSolverPluginConfig getDefaultConfig() {
+    /** Public because the AccountController needs the low credits settings after an account check. */
+    public CaptchaSolverPluginConfig getDefaultConfig() {
         final Class<? extends CaptchaSolverPluginConfig> configInterfaceClass = this.getConfigInterface();
         final CaptchaSolverPluginConfig cfg = get(configInterfaceClass);
         return cfg;

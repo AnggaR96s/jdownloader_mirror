@@ -22,14 +22,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
-import org.appwork.storage.TypeRef;
-import org.appwork.utils.StringUtils;
-import org.jdownloader.plugins.controller.LazyPlugin;
-
 import jd.PluginWrapper;
 import jd.controlling.AccountController;
 import jd.http.Browser;
 import jd.http.Cookies;
+import jd.http.Request;
 import jd.http.requests.PostRequest;
 import jd.nutils.encoding.Encoding;
 import jd.parser.Regex;
@@ -47,11 +44,15 @@ import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 import jd.plugins.PluginForHost;
 
-@HostPlugin(revision = "$Revision: 53237 $", interfaceVersion = 3, names = {}, urls = {})
+import org.appwork.storage.TypeRef;
+import org.appwork.utils.StringUtils;
+import org.jdownloader.plugins.controller.LazyPlugin;
+
+@HostPlugin(revision = "$Revision: 53504 $", interfaceVersion = 3, names = {}, urls = {})
 public class HypnotubeCom extends PluginForHost {
     public HypnotubeCom(PluginWrapper wrapper) {
         super(wrapper);
-        this.enablePremium("https://www." + this.getHost() + "/signup");
+        this.enablePremium("https://" + this.getHost() + "/signup");
     }
 
     @Override
@@ -146,6 +147,11 @@ public class HypnotubeCom extends PluginForHost {
         return requestFileInformation(link, AccountController.getInstance().getValidAccount(getHost()), false);
     }
 
+    private void getPage(Browser br, Request request) throws Exception {
+        br.getPage(request);
+        handleAgeGate(br);
+    }
+
     private void handleAgeGate(Browser br) throws Exception {
         final String path = br._getURL().getPath();
         final String msg = "Age Gate blocked";
@@ -186,16 +192,14 @@ public class HypnotubeCom extends PluginForHost {
         }
         if (new Regex(link.getPluginPatternMatcher(), PATTERN_EMBED).patternFind()) {
             /* Access normal video URL so we can find the video title */
-            br.getPage("https://" + this.getHost() + "/video/-" + videoid + ".html");
-            handleAgeGate(br);
+            getPage(br, br.createGetRequest("https://" + this.getHost() + "/video/-" + videoid + ".html"));
             final String normalURL = br.getRegex("(https?://[^/]+/video/[a-z0-9\\-]+-" + videoid + "\\.html)").getMatch(0);
             if (normalURL != null) {
                 /* Prepare our filename-fallback for later. */
                 titleFromURL = getURLTitle(normalURL);
             }
         } else {
-            br.getPage(link.getPluginPatternMatcher());
-            handleAgeGate(br);
+            getPage(br, br.createGetRequest(link.getPluginPatternMatcher()));
         }
         if (br.getHttpConnection().getResponseCode() == 404) {
             throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
@@ -205,9 +209,12 @@ public class HypnotubeCom extends PluginForHost {
         best_resolution: if (sources != null) {
             int best_resolution = -1;
             for (String source : sources) {
-                final String resolutionString = new Regex(source, "sizes\\s*=\\s*'(\\d+)").getMatch(0);
+                String resolutionString = new Regex(source, "sizes\\s*=\\s*'(\\d+)").getMatch(0);
+                if (resolutionString == null) {
+                    resolutionString = "-1";
+                }
                 if (dllink == null || Integer.parseInt(resolutionString) > best_resolution) {
-                    dllink = new Regex(source, "src=\"(https?://[^\"]+)").getMatch(0);
+                    dllink = Encoding.htmlOnlyDecode(new Regex(source, "src=\"(https?://[^\"]+)").getMatch(0));
                     best_resolution = Integer.parseInt(resolutionString);
                 }
             }
@@ -256,11 +263,10 @@ public class HypnotubeCom extends PluginForHost {
                     return false;
                 }
                 if (checkurl != null) {
-                    br.getPage(checkurl);
+                    getPage(br, br.createGetRequest(checkurl));
                 } else {
-                    br.getPage("https://www." + this.getHost() + "/");
+                    getPage(br, br.createGetRequest("https://" + this.getHost() + "/"));
                 }
-                handleAgeGate(br);
                 if (this.isLoggedin(br)) {
                     logger.info("Cookie login successful");
                     /* Refresh cookie timestamp */
@@ -273,9 +279,11 @@ public class HypnotubeCom extends PluginForHost {
                 }
             }
             logger.info("Performing full login");
-            br.getPage("https://www." + this.getHost() + "/login");
-            handleAgeGate(br);
+            getPage(br, br.createGetRequest("https://" + this.getHost() + "/login"));
             Form loginform = br.getFormbyProperty("id", "formLogin"); // shesfreaky.com
+            if (loginform == null) {
+                loginform = br.getFormbyActionRegex(".*/login.*");// shesfreaky.com
+            }
             if (loginform == null) {
                 loginform = br.getFormbyProperty("id", "login-form"); // hypnotube.com
                 if (loginform == null) {
@@ -285,16 +293,24 @@ public class HypnotubeCom extends PluginForHost {
             if (loginform == null) {
                 throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT, "Failed to find loginform");
             }
-            loginform.put("ahd_username", Encoding.urlEncode(account.getUser()));
-            loginform.put("ahd_password", Encoding.urlEncode(account.getPass()));
-            br.submitForm(loginform);
+            if (loginform.getInputFieldByName("name") != null) {
+                loginform.put("name", Encoding.urlEncode(account.getUser()));
+            } else {
+                loginform.put("ahd_username", Encoding.urlEncode(account.getUser()));
+            }
+            if (loginform.getInputFieldByName("password") != null) {
+                loginform.put("password", Encoding.urlEncode(account.getPass()));
+            } else {
+                loginform.put("ahd_password", Encoding.urlEncode(account.getPass()));
+            }
+            getPage(br, br.createFormRequest(loginform));
             if (!isLoggedin(br)) {
                 throw new AccountInvalidException();
             }
-            if (checkurl != null) {
-                br.getPage(checkurl);
-            }
             account.saveCookies(br.getCookies(br.getHost()), "");
+            if (checkurl != null) {
+                getPage(br, br.createGetRequest(checkurl));
+            }
             return true;
         }
     }

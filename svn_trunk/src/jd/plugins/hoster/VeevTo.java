@@ -18,6 +18,8 @@ package jd.plugins.hoster;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -41,7 +43,7 @@ import jd.plugins.HostPlugin;
 import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 
-@HostPlugin(revision = "$Revision: 50829 $", interfaceVersion = 3, names = {}, urls = {})
+@HostPlugin(revision = "$Revision: 53356 $", interfaceVersion = 3, names = {}, urls = {})
 public class VeevTo extends XFileSharingProBasic {
     public VeevTo(final PluginWrapper wrapper) {
         super(wrapper);
@@ -195,6 +197,218 @@ public class VeevTo extends XFileSharingProBasic {
             logger.info("Successfully found dllink via official video download");
         }
         return dllink;
+    }
+
+    private static int jsInt(char ch) {
+        return Character.getNumericValue(ch);
+    }
+
+    public static List<List<Integer>> buildArray(String encodedString) {
+        final List<List<Integer>> d = new ArrayList<List<Integer>>();
+        // LinkedList erlaubt effizientes FIFO-Verhalten (pop(0) / removeFirst)
+        final LinkedList<Character> c = new LinkedList<Character>();
+        for (char ch : encodedString.toCharArray()) {
+            c.add(ch);
+        }
+        int count = jsInt(c.removeFirst());
+        while (count > 0) {
+            List<Integer> currentArray = new ArrayList<Integer>();
+            for (int i = 0; i < count; i++) {
+                // insert(0, ...) schiebt Elemente an den Anfang der Liste
+                currentArray.add(0, jsInt(c.removeFirst()));
+            }
+            d.add(currentArray);
+            count = jsInt(c.removeFirst());
+        }
+        return d;
+    }
+
+    // https://github.com/skoruppa/docchi-players/blob/main/veev.py
+    // https://static.veevcdn.co/assets/videoplayer/434b479.js?v4
+    @SuppressWarnings("unchecked")
+    @Override
+    protected String getEmbedDllink(final Browser br, final String embedURL, final DownloadLink link, final Account account) throws Exception, PluginException {
+        final Browser brc = br.cloneBrowser();
+        getPage(brc, embedURL);
+        final String encodedFc = brc.getRegex("window\\._vvto\\s*\\[\\s*\\w+\\s*\\]\\s*=\\s*\"([^\"]+)\"").getMatch(0);
+        if (encodedFc == null) {
+            logger.info("Failed to find encoded player 'fc' token -> Falling back to default embed handling");
+            return super.getEmbedDllink(br, embedURL, link, account);
+        }
+        final String fileCode = new Regex(embedURL, "(?i)/e/([A-Za-z0-9]+)").getMatch(0);
+        /* Decode the API token. */
+        final String ch = R(encodedFc);
+        List<List<Integer>> arr = buildArray(ch);
+        /* Ask the player API for the sources. brc is still on the embed page so the Referer is set correctly. */
+        final Browser brc2 = brc.cloneBrowser();
+        brc2.getHeaders().put("X-Requested-With", "XMLHttpRequest");
+        getPage(brc2, "/dl?op=player_api&cmd=gi&file_code=" + fileCode + "&r=&ch=" + Encoding.urlEncode(ch) + "&ie=1");
+        final Map<String, Object> entries = restoreFromString(brc2.getRequest().getHtmlCode(), TypeRef.MAP);
+        if (!"success".equals(entries.get("status"))) {
+            logger.info("player_api 'gi' did not return status 'success' -> Falling back to default embed handling");
+            return super.getEmbedDllink(br, embedURL, link, account);
+        }
+        final Map<String, Object> file = (Map<String, Object>) entries.get("file");
+        final List<Map<String, Object>> dv = (List<Map<String, Object>>) file.get("dv");
+        final Map<String, Object> dv0 = dv.get(0);
+        final String source = L(R(dv0.get("s").toString()), arr.get(0));
+        // final String resolution = L(R(dv0.get("sz").toString()), arr.get(2));
+        if (source == null) {
+            /* Unexpected format -> signals a site change. */
+            throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
+        }
+        logger.info("Successfully resolved streaming direct-URL via player API");
+        return source;
+    }
+
+    private final String hexDecode(final String hex) {
+        if (hex == null || (hex.length() % 2) != 0) {
+            return null;
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < hex.length(); i += 2) {
+            final char c1 = hex.charAt(i);
+            final char c2 = hex.charAt(i + 1);
+            final int hi = Character.digit(c1, 16);
+            final int lo = Character.digit(c2, 16);
+            if (hi < 0 || lo < 0) {
+                return null;
+            }
+            sb.append((char) ((hi << 4) | lo));
+        }
+        return sb.toString();
+    }
+
+    // 1:1 Nachbildung von JS: a = function(j)
+    public static String a(Object[] j) {
+        StringBuilder k = new StringBuilder();
+        for (Object item : j) {
+            if (item instanceof String && item.equals("NaN")) {
+                k.append("%0NaN");
+            } else {
+                int i = (Integer) item;
+                String d = Integer.toHexString(i);
+                if (i < 16) {
+                    k.append("%0").append(d);
+                } else {
+                    k.append("%").append(d);
+                }
+            }
+        }
+        // Simuliert JS decodeURIComponent(k)
+        return jsDecodeURIComponent(k.toString());
+    }
+
+    // 1:1 Nachbildung von JS: p = function(j)
+    public static Object[] p(String j) {
+        List<Object> result = new ArrayList<Object>();
+        for (int d = 0; d < j.length(); d += 2) {
+            int end = Math.min(d + 2, j.length());
+            String sub = j.substring(d, end);
+            // Simuliert JS parseInt(sub, 16)
+            Integer parsed = jsParseIntHex(sub);
+            if (parsed == null) {
+                result.add("NaN"); // JS gibt NaN zurück
+            } else {
+                result.add(parsed);
+            }
+        }
+        return result.toArray();
+    }
+
+    // Emuliert exakt das JS parseInt(str, 16) Abbrech-Verhalten
+    private static Integer jsParseIntHex(String s) {
+        int result = 0;
+        boolean hasDigit = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            final int digit = Character.digit(c, 16);
+            if (digit != -1) {
+                result = result * 16 + digit;
+                hasDigit = true;
+            } else {
+                break; // JS stoppt beim ersten Nicht-Hex-Zeichen!
+            }
+        }
+        return hasDigit ? result : null; // null = NaN
+    }
+
+    // Simuliert JS decodeURIComponent, indem fehlerhafte Sequenzen (wie %0NaN) unberührt bleiben
+    private static String jsDecodeURIComponent(String encoded) {
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < encoded.length(); i++) {
+            final char c = encoded.charAt(i);
+            if (c == '%' && i + 2 < encoded.length()) {
+                final String hex = encoded.substring(i + 1, i + 3);
+                try {
+                    final int code = Integer.parseInt(hex, 16);
+                    sb.append((char) code);
+                    i += 2;
+                    continue;
+                } catch (NumberFormatException e) {
+                    // Falls z.B. %0N vorkommt, lässt JS es stehen
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    // 1:1 Nachbildung von JS: T = function(j)
+    public static String T(String j) {
+        return new StringBuilder(j).reverse().toString();
+    }
+
+    // 1:1 Nachbildung von JS: L = function(j, I)
+    public static String L(String j, List<Integer> I) {
+        String D = j;
+        for (int k = 0; k < I.size(); k++) {
+            if (1 == I.get(k)) {
+                D = T(D);
+            }
+            D = a(p(D)).replace("dXRmOA==", "");
+        }
+        return D;
+    }
+
+    public static String R(String j) {
+        if (j == null || j.isEmpty()) {
+            return "";
+        }
+        char[] k = j.toCharArray();
+        String C = String.valueOf(k[0]);
+        String M = C;
+        final List<String> U = new ArrayList<String>();
+        U.add(C);
+        // In JS: var D = { y: M + C }, y = 256
+        // 'y' war in JS ein Name/Literal, keine Variable!
+        final Map<Object, String> D = new HashMap<Object, String>();
+        D.put("y", M + C); // Key ist der String "y", NICHT 256!
+        int y = 256;
+        for (int G = 1; G < k.length; G++) {
+            int Y = k[G]; // JS: charCodeAt(0)
+            String I;
+            if (Y < 256) {
+                I = String.valueOf(k[G]);
+            } else if (D.containsKey(Y)) {
+                // Y ist ein Integer (z.B. 268) -> matcht NIE gegen den String-Key "y"!
+                I = D.get(Y);
+            } else {
+                // Deshalb sprang JS IMMER hierhin wenn Y >= 256 war!
+                I = M + C;
+            }
+            U.add(I);
+            C = String.valueOf(I.charAt(0));
+            // Erst hier wird der numerische Key 256, 257, ... gesetzt:
+            D.put(y, M + C);
+            y++;
+            M = I;
+        }
+        final StringBuilder result = new StringBuilder();
+        for (String s : U) {
+            result.append(s);
+        }
+        return result.toString();
     }
 
     @Override

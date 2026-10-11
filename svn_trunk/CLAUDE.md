@@ -8,9 +8,15 @@ When asked for a commit message, provide the message as **plain text with no git
 
 Always wrap the commit message in a fenced ```text code block so it can be copied with one click. The block must contain only the commit message itself (subject line, blank line, body), nothing else.
 
+## Building / Compiling
+
+**Never compile the code yourself.** Do not invoke `javac`, Eclipse, Ant, or any other build tool to verify changes. The user compiles and tests in their own IDE. Just write the code correctly; do not run a build to check it.
+
 ## Comments
 
 **All code comments must be written in English.** This applies to every comment (line comments, block comments, Javadoc), regardless of the language used in the conversation.
+
+**Use multi-line block comments (`/* ... */` or Javadoc `/** ... */`), not `//` line comments.** This applies to both single- and multi-line comments.
 
 ## Java Compatibility
 

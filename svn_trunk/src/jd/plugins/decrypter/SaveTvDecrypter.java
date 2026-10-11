@@ -27,12 +27,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
-import org.appwork.storage.TypeRef;
-import org.appwork.utils.StringUtils;
-import org.appwork.utils.formatter.TimeFormatter;
-import org.appwork.utils.parser.UrlQuery;
-import org.jdownloader.scripting.JavaScriptEngineFactory;
-
 import jd.PluginWrapper;
 import jd.config.SubConfiguration;
 import jd.controlling.AccountController;
@@ -52,10 +46,17 @@ import jd.plugins.PluginForDecrypt;
 import jd.plugins.components.PluginJSonUtils;
 import jd.plugins.hoster.SaveTv;
 
-@DecrypterPlugin(revision = "$Revision: 52997 $", interfaceVersion = 3, names = { "save.tv" }, urls = { "https?://(www\\.)?save\\.tv/STV/M/obj/archive/(?:Horizontal)?VideoArchive\\.cfm.*" })
+import org.appwork.storage.TypeRef;
+import org.appwork.utils.StringUtils;
+import org.appwork.utils.formatter.TimeFormatter;
+import org.appwork.utils.parser.UrlQuery;
+import org.jdownloader.scripting.JavaScriptEngineFactory;
+
+@DecrypterPlugin(revision = "$Revision: 53572 $", interfaceVersion = 3, names = { "save.tv" }, urls = { "https?://(www\\.)?save\\.tv/STV/M/obj/archive/(?:Horizontal)?VideoArchive\\.cfm.*" })
 public class SaveTvDecrypter extends PluginForDecrypt {
     public SaveTvDecrypter(PluginWrapper wrapper) {
         super(wrapper);
+        cfg = getPluginConfig();
     }
 
     @Override
@@ -68,7 +69,7 @@ public class SaveTvDecrypter extends PluginForDecrypt {
 
     /* Settings stuff */
     @SuppressWarnings("deprecation")
-    private final SubConfiguration cfg                                          = SubConfiguration.getConfig("save.tv");
+    private final SubConfiguration cfg;
     private final String           CRAWLER_ONLY_ADD_NEW_IDS                     = "CRAWLER_ONLY_ADD_NEW_IDS";
     private final String           CRAWLER_ACTIVATE                             = "CRAWLER_ACTIVATE";
     private static final String    CRAWLER_PROPERTY_TELECASTIDS_ADDED           = "CRAWLER_PROPERTY_TELECASTIDS_ADDED";
@@ -197,7 +198,7 @@ public class SaveTvDecrypter extends PluginForDecrypt {
                 if (crawler_DialogsEnabled) {
                     try {
                         String message = "Save.tv - Der Crawler wurde frühzeitig vom Benutzer beendet!\r\n";
-                        message += "Es wurden bisher " + ret.size() + " von " + totalLinksNum + " Links (telecastIDs) gefunden!";
+                        message += "Es wurden bisher " + ret.size() + " von " + totalLinksNum + " Links (Aufnahmen) gefunden!";
                         message += getDialogEnd();
                         jd.plugins.hoster.SaveTv.showAutoCloseDialog("save.tv Archiv-Crawler", message);
                     } catch (Throwable e2) {
@@ -210,7 +211,7 @@ public class SaveTvDecrypter extends PluginForDecrypt {
                     String message = "Save.tv - leider wurden nicht alle Links des Archives gefunden!\r\n";
                     message += "Während dem Crawlen ist es zu einem Serverfehler gekommen!\r\n";
                     message += "Wir empfehlen, es zu einem späteren Zeitpunkt nochmals zu versuchen.\r\n";
-                    message += "Es wurden nur " + ret.size() + " von " + totalLinksNum + " Links (telecastIDs) gefunden!";
+                    message += "Es wurden nur " + ret.size() + " von " + totalLinksNum + " Links (Aufnahmen) gefunden!";
                     message += getDialogEnd();
                     jd.plugins.hoster.SaveTv.showAutoCloseDialog("save.tv Archiv-Crawler", message);
                 } catch (Throwable ebr) {
@@ -222,7 +223,7 @@ public class SaveTvDecrypter extends PluginForDecrypt {
                     String message = "Save.tv - leider wurden nicht alle Links des Archives gefunden!\r\n";
                     message += "Während dem Crawlen ist es zu einem unbekannten Fehler gekommen!\r\n";
                     message += "Wir empfehlen, es zu einem späteren Zeitpunkt nochmals zu versuchen und uns den Fehler ggf. zu melden.\r\n";
-                    message += "Es wurden nur " + ret.size() + " von " + totalLinksNum + " Links (telecastIDs) gefunden!";
+                    message += "Es wurden nur " + ret.size() + " von " + totalLinksNum + " Links (Aufnahmen) gefunden!";
                     message += getDialogEnd();
                     jd.plugins.hoster.SaveTv.showAutoCloseDialog("save.tv Archiv-Crawler", message);
                 } catch (Throwable ebr) {
@@ -383,8 +384,8 @@ public class SaveTvDecrypter extends PluginForDecrypt {
         }
         final DownloadLink link = createStvDownloadlink(account, telecast_id);
         link.setAvailable(true);
-        jd.plugins.hoster.SaveTv.parseFilenameInformation_api(link, entries, true);
-        jd.plugins.hoster.SaveTv.parseQualityTagAPI(link, jd.plugins.hoster.SaveTv.jsonGetFormatArrayAPI(entries));
+        jd.plugins.hoster.SaveTv.parseFilenameInformation_api(this, link, entries, true);
+        jd.plugins.hoster.SaveTv.parseQualityTagAPI(this, link, jd.plugins.hoster.SaveTv.jsonGetFormatArrayAPI(entries));
         if (telecastID_IS_Allowed(link)) {
             link.setName(jd.plugins.hoster.SaveTv.getFilename(this, link));
             distribute(link);
@@ -408,8 +409,8 @@ public class SaveTvDecrypter extends PluginForDecrypt {
         if (fast_linkcheck) {
             link.setAvailable(true);
         }
-        jd.plugins.hoster.SaveTv.parseFilenameInformation_site(link, entries);
-        jd.plugins.hoster.SaveTv.parseQualityTagWebsite(link, (List) entries.get("ARRALLOWDDOWNLOADFORMATS"));
+        jd.plugins.hoster.SaveTv.parseFilenameInformation_site(this, link, entries);
+        jd.plugins.hoster.SaveTv.parseQualityTagWebsite(this, link, (List) entries.get("ARRALLOWDDOWNLOADFORMATS"));
         if (telecastID_IS_Allowed(link)) {
             link.setName(jd.plugins.hoster.SaveTv.getFilename(this, link));
             distribute(link);
@@ -669,7 +670,7 @@ public class SaveTvDecrypter extends PluginForDecrypt {
         } else if (ret.size() < totalLinksNum) {
             try {
                 String message = "Save.tv - leider wurden nicht alle Links des Archives gefunden!";
-                message += "\r\nEs wurden nur " + ret.size() + " von " + totalLinksNum + " Links (telecastIDs) gefunden!";
+                message += "\r\nEs wurden nur " + ret.size() + " von " + totalLinksNum + " Links (Aufnahmen) gefunden!";
                 message += "\r\n" + getDialogAccountsInfo();
                 message += getDialogEnd();
                 jd.plugins.hoster.SaveTv.showAutoCloseDialog("save.tv Archiv-Crawler", message);

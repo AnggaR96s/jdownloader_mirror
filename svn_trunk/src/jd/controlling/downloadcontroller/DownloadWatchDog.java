@@ -17,7 +17,6 @@ package jd.controlling.downloadcontroller;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
@@ -41,6 +40,80 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.appwork.controlling.State;
+import org.appwork.controlling.StateEvent;
+import org.appwork.controlling.StateEventListener;
+import org.appwork.controlling.StateMachine;
+import org.appwork.controlling.StateMachineInterface;
+import org.appwork.exceptions.WTFException;
+import org.appwork.scheduler.DelayedRunnable;
+import org.appwork.shutdown.ShutdownController;
+import org.appwork.shutdown.ShutdownRequest;
+import org.appwork.shutdown.ShutdownVetoException;
+import org.appwork.shutdown.ShutdownVetoListener;
+import org.appwork.storage.config.JsonConfig;
+import org.appwork.storage.config.ValidationException;
+import org.appwork.storage.config.events.GenericConfigEventListener;
+import org.appwork.storage.config.handler.KeyHandler;
+import org.appwork.uio.ExceptionDialogInterface;
+import org.appwork.uio.UIOManager;
+import org.appwork.utils.ConcatIterator;
+import org.appwork.utils.DebugMode;
+import org.appwork.utils.NullsafeAtomicReference;
+import org.appwork.utils.StringUtils;
+import org.appwork.utils.event.DefaultEventListener;
+import org.appwork.utils.event.queue.QueueAction;
+import org.appwork.utils.logging2.LogInterface;
+import org.appwork.utils.logging2.LogSource;
+import org.appwork.utils.net.httpconnection.ProxyAuthException;
+import org.appwork.utils.net.httpconnection.ProxyConnectException;
+import org.appwork.utils.os.CrossSystem;
+import org.appwork.utils.speedmeter.SpeedMeterInterface.Resolution;
+import org.appwork.utils.swing.dialog.Dialog;
+import org.appwork.utils.swing.dialog.ExceptionDialog;
+import org.jdownloader.captcha.blacklist.CaptchaBlackList;
+import org.jdownloader.controlling.DownloadLinkWalker;
+import org.jdownloader.controlling.FileCreationEvent;
+import org.jdownloader.controlling.FileCreationListener;
+import org.jdownloader.controlling.FileCreationManager;
+import org.jdownloader.controlling.FileCreationManager.DeleteOption;
+import org.jdownloader.controlling.Priority;
+import org.jdownloader.controlling.domainrules.DomainRuleController;
+import org.jdownloader.controlling.domainrules.event.DomainRuleControllerListener;
+import org.jdownloader.controlling.download.DownloadControllerListener;
+import org.jdownloader.controlling.hosterrule.AccountUsageRule;
+import org.jdownloader.controlling.hosterrule.HosterRuleController;
+import org.jdownloader.controlling.hosterrule.HosterRuleControllerListener;
+import org.jdownloader.gui.IconKey;
+import org.jdownloader.gui.translate._GUI;
+import org.jdownloader.gui.views.downloads.action.ResetSettings;
+import org.jdownloader.images.AbstractIcon;
+import org.jdownloader.logging.LogController;
+import org.jdownloader.plugins.ConditionalSkipReason;
+import org.jdownloader.plugins.ConditionalSkipReasonException;
+import org.jdownloader.plugins.FinalLinkState;
+import org.jdownloader.plugins.IgnorableConditionalSkipReason;
+import org.jdownloader.plugins.MirrorLoading;
+import org.jdownloader.plugins.SkipReason;
+import org.jdownloader.plugins.SkipReasonException;
+import org.jdownloader.plugins.TimeOutCondition;
+import org.jdownloader.plugins.ValidatableConditionalSkipReason;
+import org.jdownloader.plugins.WaitForAccountSkipReason;
+import org.jdownloader.plugins.WaitWhileWaitingSkipReasonIsSet;
+import org.jdownloader.plugins.WaitingSkipReason;
+import org.jdownloader.plugins.WaitingSkipReason.CAUSE;
+import org.jdownloader.plugins.controller.container.ContainerPluginController;
+import org.jdownloader.settings.CleanAfterDownloadAction;
+import org.jdownloader.settings.GeneralSettings;
+import org.jdownloader.settings.GeneralSettings.OnSkipDueToAlreadyExistsAction;
+import org.jdownloader.settings.IfFileExistsAction;
+import org.jdownloader.settings.MirrorDetectionDecision;
+import org.jdownloader.settings.staticreferences.CFG_CAPTCHA;
+import org.jdownloader.settings.staticreferences.CFG_GENERAL;
+import org.jdownloader.settings.staticreferences.CFG_RECONNECT;
+import org.jdownloader.translate._JDT;
+import org.jdownloader.utils.JDFileUtils;
+
 import jd.controlling.AccountController;
 import jd.controlling.AccountControllerEvent;
 import jd.controlling.AccountControllerListener;
@@ -54,6 +127,8 @@ import jd.controlling.downloadcontroller.DownloadLinkCandidateSelector.CachedAcc
 import jd.controlling.downloadcontroller.DownloadLinkCandidateSelector.DownloadLinkCandidatePermission;
 import jd.controlling.downloadcontroller.DownloadSession.STOPMARK;
 import jd.controlling.downloadcontroller.DownloadSession.SessionState;
+import jd.controlling.downloadcontroller.FilePathChecker.CheckFlag;
+import jd.controlling.downloadcontroller.IfFilenameTooLongDialog.IfFilenameTooLongAction;
 import jd.controlling.downloadcontroller.ProxyInfoHistory.WaitingSkipReasonContainer;
 import jd.controlling.downloadcontroller.event.DownloadWatchdogEvent;
 import jd.controlling.downloadcontroller.event.DownloadWatchdogEventSender;
@@ -98,87 +173,6 @@ import jd.plugins.download.Downloadable;
 import jd.plugins.download.HashInfo;
 import jd.plugins.download.HashResult;
 import jd.plugins.download.raf.FileBytesCache;
-
-import org.appwork.controlling.State;
-import org.appwork.controlling.StateEvent;
-import org.appwork.controlling.StateEventListener;
-import org.appwork.controlling.StateMachine;
-import org.appwork.controlling.StateMachineInterface;
-import org.appwork.exceptions.WTFException;
-import org.appwork.scheduler.DelayedRunnable;
-import org.appwork.shutdown.ShutdownController;
-import org.appwork.shutdown.ShutdownRequest;
-import org.appwork.shutdown.ShutdownVetoException;
-import org.appwork.shutdown.ShutdownVetoListener;
-import org.appwork.storage.config.JsonConfig;
-import org.appwork.storage.config.ValidationException;
-import org.appwork.storage.config.events.GenericConfigEventListener;
-import org.appwork.storage.config.handler.KeyHandler;
-import org.appwork.uio.CloseReason;
-import org.appwork.uio.ExceptionDialogInterface;
-import org.appwork.uio.UIOManager;
-import org.appwork.utils.ConcatIterator;
-import org.appwork.utils.DebugMode;
-import org.appwork.utils.IO;
-import org.appwork.utils.NullsafeAtomicReference;
-import org.appwork.utils.StringUtils;
-import org.appwork.utils.event.DefaultEventListener;
-import org.appwork.utils.event.queue.QueueAction;
-import org.appwork.utils.logging2.LogInterface;
-import org.appwork.utils.logging2.LogSource;
-import org.appwork.utils.net.httpconnection.ProxyAuthException;
-import org.appwork.utils.net.httpconnection.ProxyConnectException;
-import org.appwork.utils.os.CrossSystem;
-import org.appwork.utils.os.CrossSystem.OperatingSystem;
-import org.appwork.utils.speedmeter.SpeedMeterInterface.Resolution;
-import org.appwork.utils.swing.dialog.Dialog;
-import org.appwork.utils.swing.dialog.ExceptionDialog;
-import org.jdownloader.captcha.blacklist.CaptchaBlackList;
-import org.jdownloader.controlling.DownloadLinkWalker;
-import org.jdownloader.controlling.FileCreationEvent;
-import org.jdownloader.controlling.FileCreationListener;
-import org.jdownloader.controlling.FileCreationManager;
-import org.jdownloader.controlling.FileCreationManager.DeleteOption;
-import org.jdownloader.controlling.Priority;
-import org.jdownloader.controlling.UniqueAlltimeID;
-import org.jdownloader.controlling.domainrules.DomainRuleController;
-import org.jdownloader.controlling.domainrules.event.DomainRuleControllerListener;
-import org.jdownloader.controlling.download.DownloadControllerListener;
-import org.jdownloader.controlling.hosterrule.AccountUsageRule;
-import org.jdownloader.controlling.hosterrule.HosterRuleController;
-import org.jdownloader.controlling.hosterrule.HosterRuleControllerListener;
-import org.jdownloader.gui.IconKey;
-import org.jdownloader.gui.translate._GUI;
-import org.jdownloader.gui.views.downloads.action.ResetSettings;
-import org.jdownloader.images.AbstractIcon;
-import org.jdownloader.logging.LogController;
-import org.jdownloader.plugins.ConditionalSkipReason;
-import org.jdownloader.plugins.ConditionalSkipReasonException;
-import org.jdownloader.plugins.FinalLinkState;
-import org.jdownloader.plugins.IgnorableConditionalSkipReason;
-import org.jdownloader.plugins.MirrorLoading;
-import org.jdownloader.plugins.SkipReason;
-import org.jdownloader.plugins.SkipReasonException;
-import org.jdownloader.plugins.TimeOutCondition;
-import org.jdownloader.plugins.ValidatableConditionalSkipReason;
-import org.jdownloader.plugins.WaitForAccountSkipReason;
-import org.jdownloader.plugins.WaitWhileWaitingSkipReasonIsSet;
-import org.jdownloader.plugins.WaitingSkipReason;
-import org.jdownloader.plugins.WaitingSkipReason.CAUSE;
-import org.jdownloader.plugins.controller.container.ContainerPluginController;
-import org.jdownloader.settings.CleanAfterDownloadAction;
-import org.jdownloader.settings.GeneralSettings;
-import org.jdownloader.settings.IfFileExistsAction;
-import org.jdownloader.settings.IfFilenameTooLongAction;
-import org.jdownloader.settings.MirrorDetectionDecision;
-import org.jdownloader.settings.staticreferences.CFG_CAPTCHA;
-import org.jdownloader.settings.staticreferences.CFG_GENERAL;
-import org.jdownloader.settings.staticreferences.CFG_RECONNECT;
-import org.jdownloader.translate._JDT;
-import org.jdownloader.utils.JDFileUtils;
-
-import com.sun.jna.platform.win32.Advapi32Util;
-import com.sun.jna.platform.win32.WinReg;
 
 public class DownloadWatchDog implements DownloadControllerListener, StateMachineInterface, ShutdownVetoListener, FileCreationListener {
     private class ReconnectThread extends Thread {
@@ -237,11 +231,11 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         }
     }
 
-    public static final State                              IDLE_STATE            = new State("IDLE");
-    public static final State                              RUNNING_STATE         = new State("RUNNING");
-    public static final State                              PAUSE_STATE           = new State("PAUSE");
-    public static final State                              STOPPING_STATE        = new State("STOPPING");
-    public static final State                              STOPPED_STATE         = new State("STOPPED_STATE");
+    public static final State IDLE_STATE     = new State("IDLE");
+    public static final State RUNNING_STATE  = new State("RUNNING");
+    public static final State PAUSE_STATE    = new State("PAUSE");
+    public static final State STOPPING_STATE = new State("STOPPING");
+    public static final State STOPPED_STATE  = new State("STOPPED_STATE");
     static {
         IDLE_STATE.addChildren(RUNNING_STATE);
         RUNNING_STATE.addChildren(STOPPING_STATE, PAUSE_STATE);
@@ -286,20 +280,29 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         /* speed limit */
         org.jdownloader.settings.staticreferences.CFG_GENERAL.DOWNLOAD_SPEED_LIMIT.getEventSender().addListener(new GenericConfigEventListener<Integer>() {
             public void onConfigValueModified(KeyHandler<Integer> keyHandler, Integer newValue) {
-                dsm.setLimit(config.isDownloadSpeedLimitEnabled() ? config.getDownloadSpeedLimit() : 0);
+                updateDownloadSpeedManagerLimit();
             }
 
             public void onConfigValidatorError(KeyHandler<Integer> keyHandler, Integer invalidValue, ValidationException validateException) {
             }
         }, false);
-        this.dsm.setLimit(config.isDownloadSpeedLimitEnabled() ? config.getDownloadSpeedLimit() : 0);
+        updateDownloadSpeedManagerLimit();
         /* speed limiter enabled? */
         org.jdownloader.settings.staticreferences.CFG_GENERAL.DOWNLOAD_SPEED_LIMIT_ENABLED.getEventSender().addListener(new GenericConfigEventListener<Boolean>() {
             public void onConfigValidatorError(KeyHandler<Boolean> keyHandler, Boolean invalidValue, ValidationException validateException) {
             }
 
             public void onConfigValueModified(KeyHandler<Boolean> keyHandler, Boolean newValue) {
-                dsm.setLimit(config.isDownloadSpeedLimitEnabled() ? config.getDownloadSpeedLimit() : 0);
+                updateDownloadSpeedManagerLimit();
+            }
+        }, false);
+        /* pause speed: while paused the effective limit follows the pause speed, so react to changes as well */
+        org.jdownloader.settings.staticreferences.CFG_GENERAL.PAUSE_SPEED.getEventSender().addListener(new GenericConfigEventListener<Integer>() {
+            public void onConfigValueModified(KeyHandler<Integer> keyHandler, Integer newValue) {
+                updateDownloadSpeedManagerLimit();
+            }
+
+            public void onConfigValidatorError(KeyHandler<Integer> keyHandler, Integer invalidValue, ValidationException validateException) {
             }
         }, false);
         /* changes in max simultaneous downloads */
@@ -356,28 +359,29 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         org.jdownloader.settings.staticreferences.CFG_GENERAL.MAX_SIMULTANE_DOWNLOADS_PER_HOST.getEventSender().addListener(new GenericConfigEventListener<Integer>() {
             @Override
             public void onConfigValueModified(KeyHandler<Integer> keyHandler, final Integer newValue) {
-                if (org.jdownloader.settings.staticreferences.CFG_GENERAL.MAX_DOWNLOADS_PER_HOST_ENABLED.isEnabled()) {
-                    enqueueJob(new DownloadWatchDogJob() {
-                        @Override
-                        public void execute(DownloadSession currentSession) {
-                            if (newValue != null && org.jdownloader.settings.staticreferences.CFG_GENERAL.MAX_DOWNLOADS_PER_HOST_ENABLED.isEnabled()) {
-                                currentSession.setMaxConcurrentDownloadsPerHost(newValue);
-                            } else {
-                                currentSession.setMaxConcurrentDownloadsPerHost(-1);
-                            }
-                            currentSession.refreshCandidates();
-                        }
-
-                        @Override
-                        public void interrupt() {
-                        }
-
-                        @Override
-                        public boolean isHighPriority() {
-                            return false;
-                        }
-                    });
+                if (!org.jdownloader.settings.staticreferences.CFG_GENERAL.MAX_DOWNLOADS_PER_HOST_ENABLED.isEnabled()) {
+                    return;
                 }
+                enqueueJob(new DownloadWatchDogJob() {
+                    @Override
+                    public void execute(DownloadSession currentSession) {
+                        if (newValue != null && org.jdownloader.settings.staticreferences.CFG_GENERAL.MAX_DOWNLOADS_PER_HOST_ENABLED.isEnabled()) {
+                            currentSession.setMaxConcurrentDownloadsPerHost(newValue);
+                        } else {
+                            currentSession.setMaxConcurrentDownloadsPerHost(-1);
+                        }
+                        currentSession.refreshCandidates();
+                    }
+
+                    @Override
+                    public void interrupt() {
+                    }
+
+                    @Override
+                    public boolean isHighPriority() {
+                        return false;
+                    }
+                });
             }
 
             @Override
@@ -490,16 +494,18 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                 enqueueJob(new DownloadWatchDogJob() {
                     @Override
                     public void execute(DownloadSession currentSession) {
-                        if (event.getResult() == ReconnectResult.SUCCESSFUL) {
-                            final ProxyInfoHistory proxyInfoHistory = currentSession.getProxyInfoHistory();
-                            proxyInfoHistory.validate();
-                            final List<WaitingSkipReasonContainer> reconnects = proxyInfoHistory.list(WaitingSkipReason.CAUSE.IP_BLOCKED, null);
-                            if (reconnects != null) {
-                                for (WaitingSkipReasonContainer reconnect : reconnects) {
-                                    if (reconnect.getProxySelector().isReconnectSupported()) {
-                                        reconnect.invalidate();
-                                    }
-                                }
+                        if (event.getResult() != ReconnectResult.SUCCESSFUL) {
+                            return;
+                        }
+                        final ProxyInfoHistory proxyInfoHistory = currentSession.getProxyInfoHistory();
+                        proxyInfoHistory.validate();
+                        final List<WaitingSkipReasonContainer> reconnects = proxyInfoHistory.list(WaitingSkipReason.CAUSE.IP_BLOCKED, null);
+                        if (reconnects == null) {
+                            return;
+                        }
+                        for (WaitingSkipReasonContainer reconnect : reconnects) {
+                            if (reconnect.getProxySelector().isReconnectSupported()) {
+                                reconnect.invalidate();
                             }
                         }
                     }
@@ -532,6 +538,11 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
 
             @Override
             public void onStateChange(StateEvent event) {
+                /*
+                 * recalculate the effective speed manager limit on every state change so that entering/leaving pause (through any path:
+                 * pause toggle, stop, start) applies/removes the pause throttling
+                 */
+                updateDownloadSpeedManagerLimit();
                 if (event.getNewState() == RUNNING_STATE) {
                     eventSender.fireEvent(new DownloadWatchdogEvent(this, DownloadWatchdogEvent.Type.STATE_RUNNING));
                 } else if (event.getNewState() == STOPPED_STATE) {
@@ -701,82 +712,6 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         return dsm;
     }
 
-    /** Throws Exception if given download destination looks to be invalid. */
-    public void validateDestination(final File file) throws BadDestinationException {
-        if (file.exists()) {
-            return;
-        }
-        File checking = null;
-        try {
-            String[] folders;
-            switch (CrossSystem.getOSFamily()) {
-            case LINUX:
-                folders = CrossSystem.getPathComponents(file);
-                if (folders.length >= 3) {
-                    final String userName = System.getProperty("user.name");
-                    if (folders.length >= 4 && "run".equals(folders[1]) && "media".equals(folders[2]) && folders[3].equals(userName)) {
-                        /* 0:/ | 1:run | 2:media | 3:user | 4:mounted volume */
-                        checking = new File("/run/media/" + userName + "/" + folders[4]);
-                    } else if ("media".equals(folders[1])) {
-                        /* 0:/ | 1:media | 2:mounted volume */
-                        checking = new File("/media/" + folders[2]);
-                    } else if ("mnt".equals(folders[1])) {
-                        /* 0:/ | 1:media | 2:mounted volume */
-                        checking = new File("/mnt/" + folders[2]);
-                    }
-                }
-                break;
-            case MAC:
-                folders = CrossSystem.getPathComponents(file);
-                if (folders.length >= 3) {
-                    if ("media".equals(folders[1])) {
-                        /* 0:/ | 1:media | 2:mounted volume */
-                        checking = new File("/media/" + folders[2]);
-                    } else if ("mnt".equals(folders[1])) {
-                        /* 0:/ | 1:media | 2:mounted volume */
-                        checking = new File("/mnt/" + folders[2]);
-                    } else if ("Volumes".equals(folders[1])) {
-                        /* 0:/ | 1:Volumes | 2:mounted volume */
-                        checking = new File("/Volumes/" + folders[2]);
-                    }
-                }
-                break;
-            case WINDOWS:
-            default:
-                if (CrossSystem.getOS().isMaximum(OperatingSystem.WINDOWS_NT) && file.getAbsolutePath().length() > 259) {
-                    // old windows API does not allow longer paths
-                    checking = file;
-                    throw new PathTooLongException(file);
-                } else {
-                    folders = CrossSystem.getPathComponents(file);
-                    if (folders.length > 0) {
-                        String root = folders[0];
-                        if (root.matches("^[a-zA-Z]{1}:\\\\$") || root.matches("^[a-zA-Z]{1}://$")) {
-                            /* X:/ or X:\ */
-                            checking = new File(folders[0]);
-                        } else if (root.equals("\\\\")) {
-                            if (folders.length >= 3) {
-                                /* \\\\computer\\folder\\ in network */
-                                checking = new File(folders[0] + folders[1] + "\\" + folders[2]);
-                            }
-                        }
-                    }
-                }
-            }
-            if (checking != null && checking.exists() && checking.isDirectory()) {
-                checking = null;
-            }
-        } catch (BadDestinationException e) {
-            throw e;
-        } catch (Throwable e) {
-            logger.log(e);
-        }
-        if (checking != null) {
-            logger.info("DownloadFolderRoot: " + checking + " for " + file + " is invalid! Missing or not a directory!");
-            throw new BadDestinationException(checking);
-        }
-    }
-
     private DownloadLinkCandidate next(final DownloadLinkCandidateSelector selector) {
         final DownloadSession currentSession = selector.getSession();
         final HashMap<String, Boolean> destinationValidationCache = new HashMap<String, Boolean>();
@@ -794,22 +729,30 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             try {
                 final Boolean cachedValidationResult = destinationValidationCache.get(destination);
                 if (cachedValidationResult == null) {
-                    validateDestination(new File(destination));
+                    FilePathChecker.validatePath(new File(destination));
+                    validationOk = true;
+                } else if (cachedValidationResult.booleanValue() == true) {
                     validationOk = true;
                 } else {
-                    if (cachedValidationResult.booleanValue() == true) {
-                        validationOk = true;
-                    } else {
-                        for (final DownloadLinkCandidate candidate : nextCandidates) {
-                            selector.addExcluded(candidate, new DownloadLinkCandidateResult(SkipReason.INVALID_DESTINATION, null, null));
-                        }
+                    for (final DownloadLinkCandidate candidate : nextCandidates) {
+                        selector.addExcluded(candidate, new DownloadLinkCandidateResult(SkipReason.INVALID_DESTINATION, null, null));
                     }
                 }
-            } catch (PathTooLongException e) {
-                for (final DownloadLinkCandidate candidate : nextCandidates) {
-                    selector.addExcluded(candidate, new DownloadLinkCandidateResult(SkipReason.INVALID_DESTINATION_TOO_LONG_PATH, null, null));
+            } catch (final BadFilePathException e) {
+                final SkipReason skipReason;
+                switch (e.getReason()) {
+                case PATH_TOO_LONG:
+                    skipReason = SkipReason.INVALID_DESTINATION_TOO_LONG_PATH;
+                    break;
+                default:
+                    skipReason = SkipReason.INVALID_DESTINATION;
+                    break;
                 }
-            } catch (BadDestinationException e) {
+                for (final DownloadLinkCandidate candidate : nextCandidates) {
+                    selector.addExcluded(candidate, new DownloadLinkCandidateResult(skipReason, null, null));
+                }
+            } catch (final IOException e) {
+                /* e.g. canonicalization failure -> treat as invalid destination. */
                 for (final DownloadLinkCandidate candidate : nextCandidates) {
                     selector.addExcluded(candidate, new DownloadLinkCandidateResult(SkipReason.INVALID_DESTINATION, null, null));
                 }
@@ -818,7 +761,8 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             }
             if (!validationOk) {
                 continue;
-            } else if (DISKSPACERESERVATIONRESULT.FAILED.equals(validateDiskFree(nextCandidates))) {
+            }
+            if (DISKSPACERESERVATIONRESULT.FAILED.equals(validateDiskFree(nextCandidates))) {
                 for (final DownloadLinkCandidate candidate : nextCandidates) {
                     selector.addExcluded(candidate, new DownloadLinkCandidateResult(SkipReason.DISK_FULL, null, null));
                 }
@@ -898,28 +842,31 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             while (it2.hasNext()) {
                 final Entry<String, ArrayList<DownloadLinkCandidate>> next2 = it2.next();
                 final ArrayList<DownloadLinkCandidate> list = next2.getValue();
-                if (list.size() > 1) {
-                    final ArrayList<DownloadLinkCandidate> newList = new ArrayList<DownloadLinkCandidate>();
-                    try {
-                        final ArrayList<Account> accList = new ArrayList<Account>();
-                        final LinkedHashMap<Account, DownloadLinkCandidate> accMap = new LinkedHashMap<Account, DownloadLinkCandidate>();
-                        for (final DownloadLinkCandidate candidate : list) {
-                            accMap.put(candidate.getCachedAccount().getAccount(), candidate);
-                            accList.add(candidate.getCachedAccount().getAccount());
-                        }
-                        for (Account account : list.get(0).getCachedAccount().getPlugin().sortAccounts(downloadLink, accList)) {
-                            final DownloadLinkCandidate candidate = accMap.remove(account);
-                            if (candidate != null) {
-                                newList.add(candidate);
-                            }
-                        }
-                    } catch (final Throwable e) {
-                        logger.log(e);
+                if (list.size() <= 1) {
+                    /* nothing to sort */
+                    candidates.addAll(list);
+                    continue;
+                }
+                final ArrayList<DownloadLinkCandidate> newList = new ArrayList<DownloadLinkCandidate>();
+                try {
+                    final ArrayList<Account> accList = new ArrayList<Account>();
+                    final LinkedHashMap<Account, DownloadLinkCandidate> accMap = new LinkedHashMap<Account, DownloadLinkCandidate>();
+                    for (final DownloadLinkCandidate candidate : list) {
+                        accMap.put(candidate.getCachedAccount().getAccount(), candidate);
+                        accList.add(candidate.getCachedAccount().getAccount());
                     }
-                    if (newList.size() == list.size()) {
-                        candidates.addAll(newList);
-                        continue;
+                    for (Account account : list.get(0).getCachedAccount().getPlugin().sortAccounts(downloadLink, accList)) {
+                        final DownloadLinkCandidate candidate = accMap.remove(account);
+                        if (candidate != null) {
+                            newList.add(candidate);
+                        }
                     }
+                } catch (final Throwable e) {
+                    logger.log(e);
+                }
+                if (newList.size() == list.size()) {
+                    candidates.addAll(newList);
+                    continue;
                 }
                 candidates.addAll(list);
             }
@@ -931,78 +878,82 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             if (bestCandidate == null) {
                 /* no bestCandidate yet */
                 bestCandidates.put(candidateLink, nextCandidate);
-            } else if (!bestCandidate.isCustomizedAccount()) {
-                /* we have a bestCandidate, check if nextCandidate would be better */
-                final boolean bestHasCaptcha = bestCandidate.getCachedAccount().hasCaptcha(candidateLink);
-                final boolean nextHasCaptcha = nextCandidate.getCachedAccount().hasCaptcha(candidateLink);
-                switch (bestCandidate.getCachedAccount().getType()) {
-                case MULTI:
-                    /* our bestCandidate is a multihost one */
-                    switch (nextCandidate.getCachedAccount().getType()) {
-                    case ORIGINAL:
-                        if (nextHasCaptcha == false) {
-                            /* we always prefer originalAccount if it does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
-                    case MULTI:
-                        if (bestHasCaptcha && nextHasCaptcha == false) {
-                            /* we replace our bestCandidate because nextCandidate does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
-                    case NONE:
-                        if (false && bestHasCaptcha && nextHasCaptcha == false) {
-                            /* TODO */
-                            /* disabled because needs to be discussed if we prefer captchaless none over captcha original/multihost */
-                            /* we replace our bestCandidate with NONE because nextCandidate does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
+                continue;
+            }
+            if (bestCandidate.isCustomizedAccount()) {
+                /* a customized account always wins, keep it */
+                continue;
+            }
+            /* we have a bestCandidate, check if nextCandidate would be better */
+            final boolean bestHasCaptcha = bestCandidate.getCachedAccount().hasCaptcha(candidateLink);
+            final boolean nextHasCaptcha = nextCandidate.getCachedAccount().hasCaptcha(candidateLink);
+            switch (bestCandidate.getCachedAccount().getType()) {
+            case MULTI:
+                /* our bestCandidate is a multihost one */
+                switch (nextCandidate.getCachedAccount().getType()) {
+                case ORIGINAL:
+                    if (nextHasCaptcha == false) {
+                        /* we always prefer originalAccount if it does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
                     }
                     break;
-                case ORIGINAL:
-                    /* our bestCandidate is an original one */
-                    switch (nextCandidate.getCachedAccount().getType()) {
-                    case MULTI:
-                    case ORIGINAL:
-                        if (bestHasCaptcha && nextHasCaptcha == false) {
-                            /* we only replace originalAccount in case bestCandidate does have a captcha and nextCandidate does not */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
-                    case NONE:
-                        if (false && bestHasCaptcha && nextHasCaptcha == false) {
-                            /* TODO */
-                            /* disabled because needs to be discussed if we prefer captchaless none over captcha original/multihost */
-                            /* we replace our bestCandidate with NONE because nextCandidate does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
+                case MULTI:
+                    if (bestHasCaptcha && nextHasCaptcha == false) {
+                        /* we replace our bestCandidate because nextCandidate does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
                     }
                     break;
                 case NONE:
-                    /* our bestCandidate is without an account */
-                    switch (nextCandidate.getCachedAccount().getType()) {
-                    case NONE:
-                        if (bestHasCaptcha && nextHasCaptcha == false) {
-                            /* we replace our bestCandidate because nextCandidate does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
-                    case MULTI:
-                    case ORIGINAL:
-                        if (nextHasCaptcha == false) {
-                            /* we replace our bestCandidate because nextCandidate does not have a captcha */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        } else {
-                            /* we replace our bestCandidate because nextCandidate is original/multihost */
-                            bestCandidates.put(candidateLink, nextCandidate);
-                        }
-                        break;
+                    if (false && bestHasCaptcha && nextHasCaptcha == false) {
+                        /* TODO */
+                        /* disabled because needs to be discussed if we prefer captchaless none over captcha original/multihost */
+                        /* we replace our bestCandidate with NONE because nextCandidate does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
                     }
                     break;
                 }
+                break;
+            case ORIGINAL:
+                /* our bestCandidate is an original one */
+                switch (nextCandidate.getCachedAccount().getType()) {
+                case MULTI:
+                case ORIGINAL:
+                    if (bestHasCaptcha && nextHasCaptcha == false) {
+                        /* we only replace originalAccount in case bestCandidate does have a captcha and nextCandidate does not */
+                        bestCandidates.put(candidateLink, nextCandidate);
+                    }
+                    break;
+                case NONE:
+                    if (false && bestHasCaptcha && nextHasCaptcha == false) {
+                        /* TODO */
+                        /* disabled because needs to be discussed if we prefer captchaless none over captcha original/multihost */
+                        /* we replace our bestCandidate with NONE because nextCandidate does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
+                    }
+                    break;
+                }
+                break;
+            case NONE:
+                /* our bestCandidate is without an account */
+                switch (nextCandidate.getCachedAccount().getType()) {
+                case NONE:
+                    if (bestHasCaptcha && nextHasCaptcha == false) {
+                        /* we replace our bestCandidate because nextCandidate does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
+                    }
+                    break;
+                case MULTI:
+                case ORIGINAL:
+                    if (nextHasCaptcha == false) {
+                        /* we replace our bestCandidate because nextCandidate does not have a captcha */
+                        bestCandidates.put(candidateLink, nextCandidate);
+                    } else {
+                        /* we replace our bestCandidate because nextCandidate is original/multihost */
+                        bestCandidates.put(candidateLink, nextCandidate);
+                    }
+                    break;
+                }
+                break;
             }
         }
         ArrayList<DownloadLinkCandidate> finalCandidates = new ArrayList<DownloadLinkCandidate>(bestCandidates.values());
@@ -1116,11 +1067,10 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     private Boolean hasSameHash(final DownloadLink linkCandidate, final DownloadLink mirrorCandidate) {
         final HashInfo hashInfoA = linkCandidate.getHashInfo();
         final HashInfo hashInfoB = hashInfoA != null ? mirrorCandidate.getHashInfo() : null;
-        if (hashInfoA != null && hashInfoB != null && hashInfoA.getType() == hashInfoB.getType()) {
-            return hashInfoA.equals(hashInfoB);
-        } else {
+        if (hashInfoA == null || hashInfoB == null || hashInfoA.getType() != hashInfoB.getType()) {
             return null;
         }
+        return hashInfoA.equals(hashInfoB);
     }
 
     private List<DownloadLink> findDownloadLinkMirrors(final DownloadLink link, final MirrorDetectionDecision mirrorDetectionDecision, final boolean includeDisabledLinks) {
@@ -1421,7 +1371,6 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         if (downloadLink == null) {
             downloadLink = downloadLinkCandidates.get(0).getLink();
         }
-        /* TODO: 2023-11-21: Update this so that name of part file is never longer than name of target file. */
         final File partFile = new File(downloadLink.getFileOutput() + ".part");
         final long doneSize = Math.max((partFile.exists() ? partFile.length() : 0l), downloadLink.getView().getBytesLoaded());
         final long remainingSize = downloadLink.getView().getBytesTotal() - Math.max(0, doneSize);
@@ -1532,73 +1481,74 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                     }
                 }
             }
-            if (checkNextCandidatesStage1.size() > 0) {
-                /**
-                 * find all possible proxySelectors
-                 */
-                final List<DownloadLinkCandidate> checkNextCandidatesStage2 = new ArrayList<DownloadLinkCandidate>();
-                final boolean[][] flags = new boolean[][] { { false, false }, { true, false }, { true, true } };
-                for (boolean[] flag : flags) {
-                    final Iterator<DownloadLinkCandidate> it = checkNextCandidatesStage1.iterator();
-                    while (it.hasNext()) {
-                        final DownloadLinkCandidate candidate = it.next();
-                        final List<AbstractProxySelectorImpl> proxySelectors = selector.getProxies(candidate, flag[0], flag[1]);
-                        if (proxySelectors.size() > 0) {
-                            it.remove();
-                            for (AbstractProxySelectorImpl proxySelector : proxySelectors) {
-                                checkNextCandidatesStage2.add(new DownloadLinkCandidate(candidate, proxySelector));
-                            }
-                        }
-                    }
-                    if (checkNextCandidatesStage2.size() > 0) {
-                        /**
-                         * skip next flagset because we have already found possible proxySelectors
-                         */
-                        break;
-                    }
-                }
-                /**
-                 * handle all candidates without a proxySelector
-                 */
-                for (final DownloadLinkCandidate notPossibleCandidate : checkNextCandidatesStage1) {
-                    try {
-                        if (selector.validateDownloadLinkCandidate(notPossibleCandidate)) {
-                            selector.addExcluded(notPossibleCandidate, new DownloadLinkCandidateResult(SkipReason.CONNECTION_UNAVAILABLE, null, null));
-                        }
-                    } catch (final Throwable e) {
-                        logger.log(e);
-                        selector.addExcluded(notPossibleCandidate, new DownloadLinkCandidateResult(RESULT.PLUGIN_DEFECT, null, null));
-                    }
-                }
-                final List<DownloadLinkCandidate> nextCandidates = new ArrayList<DownloadLinkCandidate>();
-                final Iterator<DownloadLinkCandidate> it = checkNextCandidatesStage2.iterator();
+            if (checkNextCandidatesStage1.size() == 0) {
+                continue;
+            }
+            /**
+             * find all possible proxySelectors
+             */
+            final List<DownloadLinkCandidate> checkNextCandidatesStage2 = new ArrayList<DownloadLinkCandidate>();
+            final boolean[][] flags = new boolean[][] { { false, false }, { true, false }, { true, true } };
+            for (boolean[] flag : flags) {
+                final Iterator<DownloadLinkCandidate> it = checkNextCandidatesStage1.iterator();
                 while (it.hasNext()) {
                     final DownloadLinkCandidate candidate = it.next();
-                    try {
-                        final DownloadLinkCandidatePermission permission = selector.getDownloadLinkCandidatePermission(candidate);
-                        switch (permission) {
-                        case OK:
-                        case OK_FORCED:
-                        case OK_SPEED_EXTENSION:
-                            if (selector.validateDownloadLinkCandidate(candidate)) {
-                                nextCandidates.add(candidate);
-                            }
-                            break;
-                        case CONCURRENCY_FORBIDDEN:
-                        case CONCURRENCY_LIMIT:
-                            if (selector.validateDownloadLinkCandidate(candidate)) {
-                                selector.addExcluded(candidate, new DownloadLinkCandidateResult(RESULT.CONNECTION_TEMP_UNAVAILABLE, null, null));
-                            }
-                            break;
+                    final List<AbstractProxySelectorImpl> proxySelectors = selector.getProxies(candidate, flag[0], flag[1]);
+                    if (proxySelectors.size() > 0) {
+                        it.remove();
+                        for (AbstractProxySelectorImpl proxySelector : proxySelectors) {
+                            checkNextCandidatesStage2.add(new DownloadLinkCandidate(candidate, proxySelector));
                         }
-                    } catch (final Throwable e) {
-                        logger.log(e);
-                        selector.addExcluded(candidate, new DownloadLinkCandidateResult(RESULT.PLUGIN_DEFECT, null, null));
                     }
                 }
-                if (nextCandidates.size() > 0) {
-                    return nextCandidates;
+                if (checkNextCandidatesStage2.size() > 0) {
+                    /**
+                     * skip next flagset because we have already found possible proxySelectors
+                     */
+                    break;
                 }
+            }
+            /**
+             * handle all candidates without a proxySelector
+             */
+            for (final DownloadLinkCandidate notPossibleCandidate : checkNextCandidatesStage1) {
+                try {
+                    if (selector.validateDownloadLinkCandidate(notPossibleCandidate)) {
+                        selector.addExcluded(notPossibleCandidate, new DownloadLinkCandidateResult(SkipReason.CONNECTION_UNAVAILABLE, null, null));
+                    }
+                } catch (final Throwable e) {
+                    logger.log(e);
+                    selector.addExcluded(notPossibleCandidate, new DownloadLinkCandidateResult(RESULT.PLUGIN_DEFECT, null, null));
+                }
+            }
+            final List<DownloadLinkCandidate> nextCandidates = new ArrayList<DownloadLinkCandidate>();
+            final Iterator<DownloadLinkCandidate> it = checkNextCandidatesStage2.iterator();
+            while (it.hasNext()) {
+                final DownloadLinkCandidate candidate = it.next();
+                try {
+                    final DownloadLinkCandidatePermission permission = selector.getDownloadLinkCandidatePermission(candidate);
+                    switch (permission) {
+                    case OK:
+                    case OK_FORCED:
+                    case OK_SPEED_EXTENSION:
+                        if (selector.validateDownloadLinkCandidate(candidate)) {
+                            nextCandidates.add(candidate);
+                        }
+                        break;
+                    case CONCURRENCY_FORBIDDEN:
+                    case CONCURRENCY_LIMIT:
+                        if (selector.validateDownloadLinkCandidate(candidate)) {
+                            selector.addExcluded(candidate, new DownloadLinkCandidateResult(RESULT.CONNECTION_TEMP_UNAVAILABLE, null, null));
+                        }
+                        break;
+                    }
+                } catch (final Throwable e) {
+                    logger.log(e);
+                    selector.addExcluded(candidate, new DownloadLinkCandidateResult(RESULT.PLUGIN_DEFECT, null, null));
+                }
+            }
+            if (nextCandidates.size() > 0) {
+                return nextCandidates;
             }
         }
         return null;
@@ -1793,6 +1743,33 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     private Object                                     shutdownLock = new Object();
     protected NullsafeAtomicReference<DownloadSession> session      = new NullsafeAtomicReference<DownloadSession>(null);
 
+    /**
+     * Updates the effective limit of the {@link DownloadSpeedManager}.
+     *
+     * While paused, the download speed is throttled to the (pause) speed limit even though the persistent DownloadSpeedLimitEnabled flag is
+     * NOT set: pause mode must never enable the speed limit in the config, otherwise a crash/restart while paused would leave the user with
+     * an active speed limit they never enabled. The pause throttling is therefore derived from the pause state here instead of from the
+     * enabled flag.
+     */
+    protected void updateDownloadSpeedManagerLimit() {
+        /* stateMachine is initialized later in the constructor than the speed limit listeners, so guard against null */
+        final boolean paused = stateMachine != null && stateMachine.isState(PAUSE_STATE);
+        final int limit;
+        if (paused) {
+            /*
+             * While paused we throttle to the (separate) pause speed. Pause mode never touches the persistent download speed limit config
+             * (neither value nor enabled flag), so a crash/restart while paused can not leave any speed limit behind, and a regular limit
+             * changed during pause (e.g. via advanced settings) is preserved.
+             */
+            limit = config.getPauseSpeed();
+        } else if (config.isDownloadSpeedLimitEnabled()) {
+            limit = config.getDownloadSpeedLimit();
+        } else {
+            limit = 0;
+        }
+        dsm.setLimit(limit);
+    }
+
     public void pauseDownloadWatchDog(final boolean value) {
         enqueueJob(new DownloadWatchDogJob() {
             @Override
@@ -1802,29 +1779,23 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                     return;
                 }
                 if (value) {
-                    /* set pause settings */
-                    currentSession.setSpeedLimitBeforePause(config.getDownloadSpeedLimit());
-                    currentSession.setSpeedWasLimitedBeforePauseEnabled(config.isDownloadSpeedLimitEnabled());
-                    config.setDownloadSpeedLimit(config.getPauseSpeed());
-                    config.setDownloadSpeedLimitEnabled(true);
+                    /*
+                     * Pause mode is a pure runtime state: it does NOT touch the persistent download speed limit config (neither the value
+                     * nor the enabled flag). The pause throttling is derived from the pause state in updateDownloadSpeedManagerLimit
+                     * (throttling to the separate pause speed). This way a crash/restart while paused can not leave any speed limit behind,
+                     * and a regular limit changed during pause is kept.
+                     */
                     logger.info("Pause enabled: Reducing downloadspeed to " + config.getPauseSpeed() + " KiB/s");
                     /* pause downloads */
                     stateMachine.setStatus(PAUSE_STATE);
                 } else {
-                    /* revert pause settings if available */
-                    if (currentSession.getSpeedLimitBeforePause() > 0) {
-                        logger.info("Pause disabled: Switch back to old downloadspeed");
-                        config.setDownloadSpeedLimit(currentSession.getSpeedLimitBeforePause());
-                    }
-                    Boolean beforeEnabled = currentSession.isSpeedWasLimitedBeforePauseEnabled();
-                    if (beforeEnabled != null) {
-                        config.setDownloadSpeedLimitEnabled(beforeEnabled);
-                    }
                     if (stateMachine.isState(DownloadWatchDog.PAUSE_STATE)) {
+                        logger.info("Pause disabled: Switch back to old downloadspeed");
                         /* we revert pause to running state */
                         stateMachine.setStatus(RUNNING_STATE);
                     }
                 }
+                /* the effective speed manager limit is (re)applied centrally by the state machine listener */
             }
 
             @Override
@@ -1876,6 +1847,10 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             DownloadInterface dli = con.getDownloadInstance();
             if (dli == null) {
                 continue;
+            }
+            if (speed < 0) {
+                /* first matching controller: start summing from 0 instead of the -1 "no data" marker */
+                speed = 0;
             }
             speed += dli.getManagedConnetionHandler().getSpeed();
         }
@@ -2181,7 +2156,7 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                                 /* now we can delete the link */
                                 Map<File, Boolean> result = null;
                                 try {
-                                    deleteFile(link, deleteTo);
+                                    result = deleteFile(link, deleteTo);
                                 } finally {
                                     synchronized (ret) {
                                         ret.put(link, result);
@@ -2414,7 +2389,8 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
             try {
                 final long currentDownloadSpeed = getDownloadSpeedManager().getSpeedMeter().getValue(Resolution.SECONDS);
                 if (currentDownloadSpeed < autoMaxDownloadSpeedLimit) {
-                    final int speedlimit = config.isDownloadSpeedLimitEnabled() ? config.getDownloadSpeedLimit() : 0;
+                    /* use the effective limit applied by the speed manager (pause speed while paused, 0 = no limit) */
+                    final int speedlimit = getDownloadSpeedManager().getLimit();
                     if (speedlimit > 0 && currentDownloadSpeed > speedlimit * 0.8) {
                         // do not start a new download: speedlimit is set, and the speed is almost at the limit
                         return false;
@@ -3099,27 +3075,26 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     }
 
     private boolean isReconnectPossible(List<WaitingSkipReasonContainer> reconnectRequests) {
-        if (CFG_RECONNECT.CFG.isReconnectAllowedToInterruptResumableDownloads()) {
-            for (final SingleDownloadController con : getSession().getControllers()) {
-                if (!con.getDownloadLink().isResumeable()) {
+        if (!CFG_RECONNECT.CFG.isReconnectAllowedToInterruptResumableDownloads()) {
+            return getSession().getControllers().size() == 0;
+        }
+        for (final SingleDownloadController con : getSession().getControllers()) {
+            if (!con.getDownloadLink().isResumeable()) {
+                /*
+                 * running downloadLink is not resumable
+                 */
+                return false;
+            }
+            for (WaitingSkipReasonContainer reconnectRequest : reconnectRequests) {
+                if (StringUtils.equals(reconnectRequest.getDlHost(), con.getDownloadLink().getHost())) {
                     /*
-                     * running downloadLink is not resumable
+                     * running downloadLink is from same host as reconnectRequest (avoid loops from free/free registered)
                      */
                     return false;
                 }
-                for (WaitingSkipReasonContainer reconnectRequest : reconnectRequests) {
-                    if (StringUtils.equals(reconnectRequest.getDlHost(), con.getDownloadLink().getHost())) {
-                        /*
-                         * running downloadLink is from same host as reconnectRequest (avoid loops from free/free registered)
-                         */
-                        return false;
-                    }
-                }
             }
-            return true;
-        } else {
-            return getSession().getControllers().size() == 0;
         }
+        return true;
     }
 
     private boolean isReconnectRequired(DownloadSession currentSession, WaitingSkipReasonContainer reconnectRequest) {
@@ -3929,10 +3904,7 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         }
         final String source;
         if (obj instanceof SingleDownloadController) {
-            String url = ((SingleDownloadController) obj).getDownloadLink().getContentUrl();
-            if (url == null) {
-                url = ((SingleDownloadController) obj).getDownloadLink().getContentUrl();
-            }
+            final String url = ((SingleDownloadController) obj).getDownloadLink().getContentUrlOrPatternMatcher();
             source = url;
         } else {
             source = null;
@@ -3975,24 +3947,24 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     /** Contains list of file-paths we got permission to write in. */
     private final static HashSet<String> accessChecks = new HashSet<String>();
 
-    public static boolean looksLikeTooLongWindowsPathOrFilename(final File file) throws IOException {
-        // TODO: Add exceptions for "non limited" paths starting with "\\?\'drive-letter'\"
-        final String[] folders = CrossSystem.getPathComponents(file);
-        for (final String folder : folders) {
-            if (looksLikeTooLongWindowsPathSegment(folder)) {
-                return true;
-            }
-        }
-        return false;
+    /**
+     * Marks the given folder as confirmed-writable in the access-check cache. </br>
+     * This is the single point that writes to {@link #accessChecks}; derive the cache key only here.
+     */
+    private static void markFolderWritable(final File parentFolder) {
+        accessChecks.add(parentFolder.getAbsolutePath());
     }
 
-    public static boolean looksLikeTooLongWindowsPathSegment(final String str) throws IOException {
-        return str.length() > 255;
+    /** @return true if we already confirmed that we can write into the given folder. */
+    private static boolean isFolderKnownWritable(final File parentFolder) {
+        return accessChecks.contains(parentFolder.getAbsolutePath());
     }
 
     /**
-     * Ensures that the file we are about to download can be written to the desired destination. </br> Also takes care about these cases: <br>
-     * - File already exists </br> - Mirror of file is currently already being downloaded <br>
+     * Ensures that the file we are about to download can be written to the desired destination. </br>
+     * Also takes care about these cases: <br>
+     * - File already exists </br>
+     * - Mirror of file is currently already being downloaded <br>
      * - [Windows] File name is too long <br>
      * - [Windows] File path is too long
      */
@@ -4003,7 +3975,6 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                 if (controller.isAborting()) {
                     throw new InterruptedException("Controller is aborted");
                 }
-                final DownloadLink downloadLink = controller.getDownloadLink();
                 /**
                  * this call may return an unsafe(not final) fileOutput, but it is the fileOutput we want to start with
                  */
@@ -4012,16 +3983,7 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                     controller.getLogger().severe("fileOutput is a directory " + fileOutput);
                     throw new SkipReasonException(SkipReason.INVALID_DESTINATION, "Invalid download destination: Folder with name of this file already exists!");
                 }
-                final boolean filenameTooLongDialogTest = false;
-                if (filenameTooLongDialogTest && DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
-                    final ParsedFilename pfname = new jd.plugins.ParsedFilename(downloadLink.getName());
-                    new IfFilenameTooLongDialog(downloadLink, pfname, downloadLink.getName()).show();
-                }
-                boolean fileExists = fileOutput.exists();
-                if (!fileExists) {
-                    /* File doesn't exist -> Ensure we can write in download folder */
-                    fileDownloadDestinationWriteCheck(session, controller);
-                }
+                final boolean fileExists = fileOutput.exists();
                 final File safeFinalFileDestination = controller.getFileOutput(true, true);
                 if (config.isAllowUnsafeFileNameForFileExistsCheck() == false && controller.getDownloadInstance() == null && safeFinalFileDestination == null) {
                     /**
@@ -4042,8 +4004,8 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                 if (controller.isAborting()) {
                     throw new InterruptedException("Controller is aborted");
                 }
-                /* Check for- and handle too long filenames */
-                fileNameTooLongHandling(session, controller);
+                /* Ensure we can write to the destination and handle too long filenames. */
+                fileDownloadDestinationWriteCheck(session, controller);
             }
 
             @Override
@@ -4108,24 +4070,6 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         throw new WTFException("WTF? Result: " + ret);
     }
 
-    /** TODO: Move this somewhere else. Maybe only do this once on application-start and cache the result. */
-    public static boolean isWindowsPathLimitActive() {
-        // TODO: Review this
-        if (!CrossSystem.isWindows()) {
-            return false;
-        }
-        try {
-            int value = Advapi32Util.registryGetIntValue(WinReg.HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\FileSystem", "LongPathsEnabled");
-            if (value == 1) {
-                /* Long paths enabled -> No path length limit active. */
-                // return false;
-                return true;
-            }
-        } catch (Exception e) {
-        }
-        return true;
-    }
-
     public String getFilename(final SingleDownloadController controller) {
         final MirrorDetectionDecision mirrorDetectionDecision = config.getMirrorDetectionDecision();
         final DownloadLink downloadLink = controller.getDownloadLink();
@@ -4157,89 +4101,286 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
         return filename;
     }
 
-    public void fileDownloadDestinationWriteCheck(final DownloadSession session, final SingleDownloadController controller) throws SkipReasonException, IOException {
-        /* File does not exist: Check- and prepare path. */
+    /**
+     * Builds a non-existing "jd_accessCheck_..." file inside the given folder whose name has exactly {@code targetNameLength} characters
+     * (but at least "jd_accessCheck_" + 4 random digits, regardless of {@code targetNameLength}). </br>
+     * The random digits both provide uniqueness and are used to pad the name to the requested length. </br>
+     * Used for the destination write-test: the test file is named differently from the real download file (so a test file that cannot be
+     * deleted right away does not collide with the real file later) but reproduces the same name length so that a too-long path/filename is
+     * still detected reliably.
+     */
+    private static File createAccessCheckFile(final File parentFolder, final int targetNameLength) {
+        final String prefix = "jd_accessCheck_";
+        /* At least 4 random digits, regardless of targetNameLength; otherwise use as many as needed to reach the requested length. */
+        int randomDigits = targetNameLength - prefix.length();
+        if (randomDigits < 4) {
+            randomDigits = 4;
+        }
+        final java.util.Random random = new java.util.Random();
+        final StringBuilder name = new StringBuilder(prefix.length() + randomDigits);
+        name.append(prefix);
+        for (int i = 0; i < randomDigits; i++) {
+            name.append(random.nextInt(10));
+        }
+        return new File(parentFolder, name.toString());
+    }
+
+    /**
+     * @return the maximum allowed filename length (number of characters) for a file placed directly inside the given parent folder on
+     *         Windows, honouring {@link GeneralSettings#isLongWindowsPathsAllowed()}. </br>
+     *         May be &lt;= 0 when the parent folder path alone already exhausts the classic MAX_PATH limit.
+     */
+    private static int getMaxWindowsFilenameLength(final File parentFolder) {
+        final int maxPathLengthWindows = 259; // 260 but only 259 usable
+        final int maxSegmentLength = 255; // NTFS per-segment limit; a hard filesystem limit that ALWAYS applies to a single filename.
+        if (JsonConfig.create(GeneralSettings.class).isLongWindowsPathsAllowed()) {
+            /* Long paths allowed -> the total path length is not the limit; only the per-segment limit applies to the filename. */
+            return maxSegmentLength;
+        }
+        /*
+         * Classic MAX_PATH -> the whole path must fit; -1 accounts for the path separator between the parent folder and the filename. The
+         * per-segment limit still applies on top of that, so cap at it - otherwise a very short parent path could yield a budget above 255.
+         */
+        return Math.min(maxSegmentLength, maxPathLengthWindows - parentFolder.getAbsolutePath().length() - 1);
+    }
+
+    /**
+     * Ensures that the file we are about to download can be written to the desired destination. </br>
+     * This combines the former destination-write-check and too-long-filename handling into a single step: <br>
+     * 1. Create the directory tree up until the download folder and perform a write-test on the target file (via
+     * {@link FilePathChecker#createFilePath(File, jd.controlling.downloadcontroller.FilePathChecker.CheckFlag...)}). <br>
+     * 2. Verify that we are allowed to write into that folder (result cached via {@link #accessChecks}). <br>
+     * 3. [Windows] Check for- and handle too long filenames (offer auto-shortening). <br>
+     * Path/permission problems detected via {@link FilePathChecker} are raised as {@link BadFilePathException} and mapped to a
+     * {@link SkipReasonException} centrally in {@link SingleDownloadController}.
+     */
+    public void fileDownloadDestinationWriteCheck(final DownloadSession session, final SingleDownloadController controller) throws SkipReasonException, DeferredRunnableException, PluginException, InterruptedException, IOException {
+        final DownloadLink downloadLink = controller.getDownloadLink();
         /**
          * this call may return an unsafe(not final) fileOutput, but it is the fileOutput we want to start with
          */
         final File fileOutput = controller.getFileOutput(false, true);
+        /* Check- and prepare path and ensure we can write into the download folder. */
+        /* Create directory tree up until file. */
+        final File parentFolder = fileOutput.getParentFile();
+        final boolean isWindows = CrossSystem.isWindows();
+        if (!isWindows) {
+            /* Non Windows OS -> Trust cache since we do not expect issues due to long paths. */
+            if (isFolderKnownWritable(parentFolder)) {
+                return;
+            }
+            if (fileOutput.exists()) {
+                /* Cheap way: Assume that file is writable. */
+                markFolderWritable(parentFolder);
+                return;
+            }
+        }
+        /**
+         * We are close to the finish line! </br>
+         * We know that we can write in the directory but can we write the specific file we want to write? </br>
+         * The filename could still be too long!
+         */
+        /**
+         * Determine the length of the longest filename the plugin could write (the final file or one of its process files, e.g. the .part
+         * file). We reproduce this worst-case name length in the write-test so that a too-long path/filename is detected reliably. <br>
+         * In most cases the longest name will be that of our temporary .part file.
+         */
+        int longestNameLength = fileOutput.getName().length();
+        final List<File> processFiles = downloadLink.getDefaultPlugin().listProcessFiles(downloadLink);
+        if (processFiles != null) {
+            for (final File file : processFiles) {
+                if (file.getName().length() > longestNameLength && !file.exists()) {
+                    longestNameLength = file.getName().length();
+                }
+            }
+        }
+        if (isWindows && isFolderKnownWritable(parentFolder) && longestNameLength <= getMaxWindowsFilenameLength(parentFolder)) {
+            /*
+             * Folder already confirmed writable. On Windows we would normally still run the write-test to catch a too-long filename, but
+             * when the worst-case name length already fits into the current path limit there is nothing left to verify -> skip the
+             * write-test just like on other operating systems.
+             */
+            return;
+        }
+        /*
+         * Perform the write-test with a file that is named differently from the real target file but has the same name length. This way a
+         * test file that (for whatever reason) could not be deleted right away does not collide with the real download file later on.
+         */
+        final File writeTest = createAccessCheckFile(parentFolder, longestNameLength);
+        /*
+         * Perform the write-test. On success - or the deletion-failure edge case - tooLongFilename stays null. If the folder itself is
+         * writable but the filename is too long on Windows, tooLongFilename holds that exception so the shortening logic below can run. Any
+         * other failure means the folder is not writable and is thrown right here (so the cache is NOT updated for it).
+         */
+        BadFilePathException tooLongFilename = null;
         try {
-            validateDestination(fileOutput);
-        } catch (final PathTooLongException e) {
-            controller.getLogger().severe("not allowed to create path (too long) " + e.getFile());
-            throw new SkipReasonException(SkipReason.INVALID_DESTINATION_TOO_LONG_PATH, e);
-        } catch (final BadDestinationException e) {
-            controller.getLogger().severe("not allowed to create path (invalid path) " + e.getFile());
-            throw new SkipReasonException(SkipReason.INVALID_DESTINATION, e);
+            FilePathChecker.createFilePath(writeTest, new CheckFlag[] { CheckFlag.IS_FILE, CheckFlag.CHECK_FILE_WRITE, CheckFlag.CHECK_FILE_FOR_TOO_LONG_FILENAME, CheckFlag.ERROR_ON_WRITE_TEST_DELETION_FAILURE });
+        } catch (final BadFilePathException e) {
+            if (e.getReason() == PathFailureReason.WRITE_TEST_DELETION_FAILURE) {
+                /*
+                 * Edge case: Write-test succeeded but the test-file could not be deleted right away -> schedule a late deletion and treat
+                 * the write-test as successful.
+                 */
+                controller.getJobsAfterDetach().add(new DownloadWatchDogJob() {
+                    @Override
+                    public void interrupt() {
+                    }
+
+                    @Override
+                    public void execute(DownloadSession currentSession) {
+                        writeTest.delete();
+                    }
+
+                    @Override
+                    public boolean isHighPriority() {
+                        return false;
+                    }
+                });
+            } else if (e.getReason() == PathFailureReason.PATH_SEGMENT_TOO_LONG) {
+                /* Folder path was created successfully and our problem is solely the (too long) file name. */
+                tooLongFilename = e;
+            } else {
+                /* Something not related to the length of our filename happened (e.g. permission problem) -> Throw exception. */
+                throw e;
+            }
         }
-        if (fileOutput.getParentFile() == null) {
+        /*
+         * INVARIANT: reaching this point always means the parent folder is confirmed writable (the write-test passed, or only the filename
+         * was too long). Any other failure was thrown above. Keep this the ONLY place that updates the access-check cache.
+         */
+        markFolderWritable(parentFolder);
+        if (tooLongFilename == null) {
+            /* Destination is fully writable -> done. */
+            return;
+        }
+        final BadFilePathException bfpe = tooLongFilename;
+        /* Looks like filename might be too long -> Check if writing a shortened filename would be possible. */
+        int maxFilenameLength = getMaxWindowsFilenameLength(parentFolder);
+        final String filename = getFilename(controller);
+        if (longestNameLength > filename.length()) {
+            /*
+             * The write-test was performed with the longest file the plugin could write (e.g. the .part file), which is longer than the
+             * filename -> the filename needs to be smaller to compensate for that.
+             */
+            maxFilenameLength = maxFilenameLength - (longestNameLength - filename.length());
+        }
+        final ParsedFilename pfname;
+        if ((pfname = new jd.plugins.ParsedFilename(filename)).isMultipartArchive()) {
+            /* Do not offer auto filename shortening for multipart archive files. User needs to do this manually. */
+            throw bfpe;
+        } else if (maxFilenameLength <= 0) {
+            /*
+             * Does not look like too long filename -> Write-fail must have happened for a different reason, possibly permission problem ->
+             * Give up.
+             */
+            logger.info("Filename is too long according to Exception but it's not");
+            throw bfpe;
+        }
+        /* Shorten filename and try again */
+        final String autoShortenedFilename = LinknameCleaner.shortenFilename(pfname, maxFilenameLength);
+        if (autoShortenedFilename == null) {
             /* This should never happen! */
-            // TODO: Maybe move this up to "fileOutput.isDirectory()" statement.
-            controller.getLogger().severe("has no parentFile?! " + fileOutput);
-            throw new SkipReasonException(SkipReason.INVALID_DESTINATION);
+            logger.info("Shortening this filename is not possible");
+            throw bfpe;
         }
-        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
-            /* Create directory tree up until file. */
-            FilePathChecker.createFolderPath(fileOutput.getParentFile());
-        } else {
-            /* Old handling */
-            if (!fileOutput.getParentFile().exists()) {
-                /* Path to file doesn't exist yet -> Create it */
-                if (!fileOutput.getParentFile().mkdirs()) {
-                    controller.getLogger().severe("could not mkdirs parentFile: " + fileOutput.getParent());
-                    if (CrossSystem.isWindows() && looksLikeTooLongWindowsPathOrFilename(fileOutput)) {
-                        controller.getLogger().severe("Looks like too long downloadpath for Windows: " + fileOutput.getParent());
-                    }
-                    throw new SkipReasonException(SkipReason.INVALID_DESTINATION);
+        /*
+         * Edge case: the shortened filename may already exist in the download folder. The file-exists check earlier in localFileCheck ran
+         * on the original (un-shortened) filename, so the shortened name was never checked. Now that the final filename is known, route
+         * this through the regular file-already-exists handling so the user's configured policy (overwrite / auto-rename / skip / set to
+         * successful mirror / ask) is honoured instead of always skipping. We pass maxFilenameLength so any filename generated there (e.g.
+         * the auto-rename "_2" variant) stays within the length limit that made us shorten in the first place.
+         */
+        final File autoShortenedFile = new File(writeTest.getParent(), autoShortenedFilename);
+        if (autoShortenedFile.exists()) {
+            logger.info("File with auto shortened filename already exists -> assume that file was created by JD -> route to file-already-exists handling");
+            /* Pass the shortened file explicitly so the handling acts on it (the link still carries the un-shortened name). */
+            fileAlreadyExistsHandling(session, controller, null, maxFilenameLength, autoShortenedFile);
+            return;
+        }
+        /* The final (possibly custom) shortened filename to use; starts with the auto-shortened suggestion. */
+        String shortenedFilename = autoShortenedFilename;
+        final IfFilenameTooLongAction action;
+        decideAction: {
+            /*
+             * Per-package remembered action first, then the session-wide one: the user may pick a per-package action for one or more
+             * packages before later deciding "don't ask again this session", so the more specific per-package choice must take precedence.
+             * getOnFilenameTooLongAction resolves the per-package action and falls back to the global default (then ASK).
+             */
+            final IfFilenameTooLongAction packageAction = session.getOnFilenameTooLongAction(downloadLink.getFilePackage());
+            if (packageAction != null && packageAction != IfFilenameTooLongAction.ASK_FOR_EACH_FILE) {
+                /* Pre-selected per-package action (or global default) -> do not ask. */
+                action = packageAction;
+                break decideAction;
+            }
+            /* Then the session-wide "don't ask again during this session" decision. */
+            final IfFilenameTooLongAction sessionWide = session.getSessionOnFilenameTooLongAction();
+            if (sessionWide != null && sessionWide != IfFilenameTooLongAction.ASK_FOR_EACH_FILE) {
+                action = sessionWide;
+                break decideAction;
+            }
+            /* Ask the user. */
+            final IfFilenameTooLongDialogInterface io = new IfFilenameTooLongDialog(downloadLink, pfname, shortenedFilename).show();
+            switch (io.getCloseReason()) {
+            case INTERRUPT:
+                throw new InterruptedException("IfFilenameTooLongDialog Interrupted");
+            case OK:
+                break;
+            default:
+                /* Timeout or dialog closed/cancelled -> do not auto rename, give up (skip). */
+                action = IfFilenameTooLongAction.SKIP_FILE;
+                break decideAction;
+            }
+            IfFilenameTooLongAction dialogAction = io.getAction();
+            if (dialogAction == null) {
+                /* Fallback */
+                dialogAction = IfFilenameTooLongAction.SKIP_FILE;
+            }
+            shortenedFilename = io.getNewFilename();
+            /* Per-package "remember" checkbox -> apply the chosen action to the remaining items of this package. */
+            if (io.isRememberForPackageSelected()) {
+                session.setOnFileFilenameTooLongAction(downloadLink.getFilePackage(), dialogAction);
+            } else {
+                session.setOnFileFilenameTooLongAction(downloadLink.getFilePackage(), null);
+            }
+            /*
+             * "Don't ask again during this session" checkbox -> store session-wide (in the DownloadSession). A custom filename or the
+             * global "do not show again" option disables the checkbox, so it only reports true for a plain auto-shortened rename or skip.
+             */
+            if (io.isDontAskAgainThisSessionSelected() && dialogAction != IfFilenameTooLongAction.ASK_FOR_EACH_FILE) {
+                session.setSessionOnFilenameTooLongAction(dialogAction);
+            }
+            /*
+             * Framework "Do not ask again" checkbox -> store as the global default. Only auto shortened rename or skip may be stored; a
+             * custom filename is a per-file decision (the dialog disables the checkbox in that case).
+             */
+            if (io.isDontShowAgainSelected()) {
+                switch (dialogAction) {
+                case AUTO_RENAME:
+                case SKIP_FILE:
+                    config.setIfFilenameTooLongAction(dialogAction);
+                    break;
+                default:
+                    break;
                 }
             }
+            action = dialogAction;
         }
-        if (!accessChecks.contains(fileOutput.getParentFile().getAbsolutePath())) {
-            /* Check if we can write in download-directory. */
-            final File writeTest = new File(fileOutput.getParentFile(), "jd_accessCheck_" + new UniqueAlltimeID().getID());
-            try {
-                if (writeTest.exists()) {
-                    /* Rare case: Test-file already exists -> Check if we can write. */
-                    if (!writeTest.canWrite()) {
-                        throw new SkipReasonException(SkipReason.INVALID_DESTINATION_PERMISSION_ISSUE, _JDT.T.DownloadLink_setSkipped_statusmessage_invalid_path_permission_issue_failed_to_write_into_folder(fileOutput.getParentFile().getName()));
-                    }
-                } else {
-                    /* Create test-file to check if we can write into directory. */
-                    try {
-                        final RandomAccessFile raf = IO.open(writeTest, "rw");
-                        raf.close();
-                    } catch (final IOException e) {
-                        throw new SkipReasonException(SkipReason.INVALID_DESTINATION_PERMISSION_ISSUE, _JDT.T.DownloadLink_setSkipped_statusmessage_invalid_path_permission_issue_failed_to_write_into_folder(fileOutput.getParentFile().getName()));
-                    }
-                }
-                accessChecks.add(fileOutput.getParentFile().getAbsolutePath());
-            } catch (final Exception e) {
-                LogSource.exception(controller.getLogger(), e);
-                if (e instanceof SkipReasonException) {
-                    throw (SkipReasonException) e;
-                } else {
-                    throw new SkipReasonException(SkipReason.INVALID_DESTINATION, e);
-                }
-            } finally {
-                if (!writeTest.delete()) {
-                    controller.getJobsAfterDetach().add(new DownloadWatchDogJob() {
-                        @Override
-                        public void interrupt() {
-                        }
-
-                        @Override
-                        public void execute(DownloadSession currentSession) {
-                            writeTest.delete();
-                        }
-
-                        @Override
-                        public boolean isHighPriority() {
-                            return false;
-                        }
-                    });
-                }
-            }
+        switch (action) {
+        case AUTO_RENAME:
+            break;
+        case SKIP_FILE:
+        default:
+            /* No rename wished -> give up (skip the too-long file). */
+            throw bfpe;
         }
+        if (shortenedFilename == null) {
+            /* Dialog returned no filename -> do not rename. */
+            throw bfpe;
+        }
+        /* Continue with shortened filename */
+        controller.setSessionDownloadFilename(shortenedFilename);
+        downloadLink.setForcedFileName(shortenedFilename);
+        downloadLink.setChunksProgress(null);
     }
 
     public void fileMirrorAlreadyDownloadingDetection(final DownloadSession session, final SingleDownloadController controller) throws ConditionalSkipReasonException, SkipReasonException, DeferredRunnableException, PluginException, InterruptedException {
@@ -4272,41 +4413,204 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     }
 
     public void fileAlreadyExistsHandling(final DownloadSession session, final SingleDownloadController controller, final DownloadLink fileInProgress) throws SkipReasonException, DeferredRunnableException, PluginException, InterruptedException {
+        /* No filename length restriction (-1) and no explicit target file -> classic behaviour. */
+        fileAlreadyExistsHandling(session, controller, fileInProgress, -1, null);
+    }
+
+    public void fileAlreadyExistsHandling(final DownloadSession session, final SingleDownloadController controller, final DownloadLink fileInProgress, final int maxFilenameLength) throws SkipReasonException, DeferredRunnableException, PluginException, InterruptedException {
+        fileAlreadyExistsHandling(session, controller, fileInProgress, maxFilenameLength, null);
+    }
+
+    /**
+     * Builds a single auto-rename candidate filename of the form "&lt;base&gt;_&lt;counter&gt;&lt;extensionWithDot&gt;". When
+     * {@code maxFilenameLength > 0} the base part is truncated so that the whole name still fits into that many characters. Returns null
+     * when even a minimal name (empty base) would not fit.
+     */
+    static String buildAutoRenameCandidate(final String baseNameWithoutExtension, final String extensionWithDot, final int counter, final int maxFilenameLength) {
+        final String suffix = "_" + counter;
+        String baseName = baseNameWithoutExtension;
+        if (maxFilenameLength > 0) {
+            final int allowedBaseLength = maxFilenameLength - suffix.length() - extensionWithDot.length();
+            if (allowedBaseLength <= 0) {
+                return null;
+            }
+            if (baseName.length() > allowedBaseLength) {
+                baseName = baseName.substring(0, allowedBaseLength);
+            }
+        }
+        return baseName + suffix + extensionWithDot;
+    }
+
+    /**
+     * Generates a suggested auto-rename filename for the given file by appending "_2", "_3", ... until a name is found that does not yet
+     * exist on disk. Uses existence-only checks (no lock detection) and is limited to a small number of attempts - it is meant for preview
+     * purposes only (e.g. as the pre-filled suggestion in the "file already exists" dialog). Returns null when no free name could be found
+     * within the attempt limit or none fits {@code maxFilenameLength}.
+     */
+    static String generateAutoRenameSuggestion(final File fileOutput, final int maxFilenameLength) {
+        final String splitName[] = CrossSystem.splitFileName(fileOutput.getName());
+        String extension = splitName[1];
+        if (extension == null) {
+            extension = "";
+        } else {
+            extension = "." + extension;
+        }
+        String baseName = splitName[0];
+        int duplicateFilenameCounter = 2;
+        final String alreadyDuplicated = new Regex(baseName, ".*_(\\d{1,5})$").getMatch(0);
+        if (alreadyDuplicated != null) {
+            /* it seems the file already got auto renamed! */
+            duplicateFilenameCounter = Integer.parseInt(alreadyDuplicated) + 1;
+            baseName = new Regex(baseName, "(.*)_\\d+$").getMatch(0);
+        }
+        final File downloadPath = fileOutput.getParentFile();
+        final int maxAutoRenameAttempts = 10;
+        for (int autoRenameAttempt = 0; autoRenameAttempt < maxAutoRenameAttempts; autoRenameAttempt++) {
+            final String candidate = buildAutoRenameCandidate(baseName, extension, duplicateFilenameCounter++, maxFilenameLength);
+            if (candidate == null) {
+                return null;
+            }
+            if (!new File(downloadPath, candidate).exists()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns true when the given target file neither exists on disk nor is currently locked by another download controller of the given
+     * session (i.e. it is safe to use as an auto-rename target).
+     */
+    static boolean isAutoRenameTargetFree(final DownloadSession session, final SingleDownloadController controller, final File target) {
+        if (target.exists()) {
+            return false;
+        }
+        for (final SingleDownloadController downloadController : session.getControllers()) {
+            if (downloadController == controller) {
+                continue;
+            }
+            if (session.getFileAccessManager().isLockedBy(target, downloadController)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @param maxFilenameLength
+     *            When > 0, any filename generated by this method (currently the auto-rename "_N" variant) must not exceed this number of
+     *            characters. This is used when we already had to shorten a too-long filename and the shortened name turned out to already
+     *            exist: the auto-rename variant would otherwise grow the name beyond the filesystem limit again. A value <= 0 means "no
+     *            restriction".
+     * @param alreadyExistingFile
+     *            The already existing file to handle instead of the controller's current output file; null to use
+     *            {@code controller.getFileOutput(...)}. Used by the too-long handling, where the collision is on the shortened name while
+     *            the download link still carries the (un-shortened) original name: passing the shortened file here lets this method act on
+     *            the correct name without prematurely forcing that name onto the link. For the "continue with this name" outcome
+     *            (overwrite) the name is then applied to the link here; auto-rename sets the (generated) name itself; skip throws.
+     */
+    public void fileAlreadyExistsHandling(final DownloadSession session, final SingleDownloadController controller, final DownloadLink fileInProgress, final int maxFilenameLength, final File alreadyExistingFile) throws SkipReasonException, DeferredRunnableException, PluginException, InterruptedException {
         /* File already exists or file is currently being downloaded. */
         final DownloadLink downloadLink = controller.getDownloadLink();
-        final File fileOutput = controller.getFileOutput(false, true);
-        IfFileExistsAction doAction = config.getIfFileExistsAction();
-        if (doAction == null || IfFileExistsAction.ASK_FOR_EACH_FILE == doAction) {
-            final DownloadSession currentSession = getSession();
-            doAction = currentSession.getOnFileExistsAction(downloadLink.getFilePackage());
-            if (doAction == null || doAction == IfFileExistsAction.ASK_FOR_EACH_FILE) {
-                final IfFileExistsDialogInterface io = new IfFileExistsDialog(downloadLink, fileInProgress).show();
-                if (io.getCloseReason() == CloseReason.TIMEOUT) {
+        final File fileOutput = alreadyExistingFile != null ? alreadyExistingFile : controller.getFileOutput(false, true);
+        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE && !fileOutput.exists()) {
+            throw new IllegalArgumentException("Provided file does not exist");
+        }
+        /* A specific new filename the user entered/confirmed in the dialog (rename case); null when not applicable. */
+        String userDefinedFilename = null;
+        /* The "on skip due to already exists" action chosen in the dialog (skip option); null -> fall back to the global config value. */
+        OnSkipDueToAlreadyExistsAction dialogOnSkipAction = null;
+        final IfFileExistsAction doAction;
+        decideAction: {
+            /*
+             * Per-package remembered action first, then the session-wide one: the user may pick a per-package action for one or more
+             * packages before later deciding "don't ask again this session", so the more specific per-package choice must take precedence.
+             * getOnFileExistsAction resolves the per-package action and falls back to the global default (then ASK).
+             */
+            final IfFileExistsAction packageAction = session.getOnFileExistsAction(downloadLink.getFilePackage());
+            if (packageAction != null && packageAction != IfFileExistsAction.ASK_FOR_EACH_FILE) {
+                /* Pre-selected per-package action (or global default) -> do not ask. */
+                doAction = packageAction;
+                break decideAction;
+            }
+            /* Then the session-wide "don't ask again during this session" decision. */
+            final IfFileExistsAction sessionWide = session.getSessionOnFileExistsAction();
+            if (sessionWide != null && sessionWide != IfFileExistsAction.ASK_FOR_EACH_FILE) {
+                doAction = sessionWide;
+                break decideAction;
+            }
+            {
+                /* Get action from dialog */
+                /* The dialog is going to be shown -> we always need an auto-rename suggestion to display and pre-fill. */
+                final String autoRenameSuggestion = generateAutoRenameSuggestion(fileOutput, maxFilenameLength);
+                /* Pass the actual existing file (fileOutput) so the dialog shows the correct name/size, also in the too-long case. */
+                final IfFileExistsDialogInterface io = new IfFileExistsDialog(downloadLink, fileInProgress, autoRenameSuggestion, maxFilenameLength, fileOutput).show();
+                switch (io.getCloseReason()) {
+                case TIMEOUT:
                     /* User did not react -> All we can do is display an error. */
                     throw new SkipReasonException(SkipReason.FILE_EXISTS);
-                } else if (io.getCloseReason() == CloseReason.INTERRUPT) {
+                case INTERRUPT:
                     throw new InterruptedException("IFFileExistsDialog Interrupted");
-                }
-                if (io.getCloseReason() == CloseReason.OK) {
-                    doAction = io.getAction();
-                } else {
+                case OK:
+                    break;
+                default:
+                    /* Dialog closed/cancelled -> skip. */
                     doAction = IfFileExistsAction.SKIP_FILE;
+                    break decideAction;
                 }
-                if (doAction == null) {
+                IfFileExistsAction dialogAction = io.getAction();
+                /* Only relevant for the rename case; null otherwise. */
+                userDefinedFilename = io.getNewFilename();
+                /* Only relevant for the skip case; null otherwise -> caller then uses the global config value. */
+                dialogOnSkipAction = io.getOnSkipDueToAlreadyExistsAction();
+                if (dialogAction == null) {
                     /* Fallback */
-                    doAction = IfFileExistsAction.SKIP_FILE;
+                    dialogAction = IfFileExistsAction.SKIP_FILE;
                 }
-                if (io.isDontShowAgainSelected() && io.getCloseReason() == CloseReason.OK) {
-                    currentSession.setOnFileExistsAction(downloadLink.getFilePackage(), doAction);
+                if (userDefinedFilename != null && userDefinedFilename.equalsIgnoreCase(fileOutput.getName())) {
+                    logger.info("User chosen filename is the same as before");
+                    throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
+                }
+                /* Per-package "remember" checkbox -> apply the chosen action to the remaining items of this package. */
+                if (io.isRememberForPackageSelected()) {
+                    session.setOnFileExistsAction(downloadLink.getFilePackage(), dialogAction);
                 } else {
-                    currentSession.setOnFileExistsAction(downloadLink.getFilePackage(), null);
+                    session.setOnFileExistsAction(downloadLink.getFilePackage(), null);
                 }
+                /*
+                 * "Don't ask again during this session" checkbox -> store session-wide (in the DownloadSession). A custom filename or the
+                 * global "do not show again" option disables the checkbox, so it only reports true for a plain overwrite/skip/auto-rename.
+                 */
+                if (io.isDontAskAgainThisSessionSelected() && dialogAction != IfFileExistsAction.ASK_FOR_EACH_FILE) {
+                    session.setSessionOnFileExistsAction(dialogAction);
+                }
+                /*
+                 * Framework "Do not ask again" checkbox -> store as the global default. Only overwrite/skip/auto-rename may be stored; a
+                 * custom filename is a per-file decision (the dialog disables the checkbox in that case) and ASK must never be stored.
+                 */
+                if (io.isDontShowAgainSelected()) {
+                    switch (dialogAction) {
+                    case OVERWRITE_FILE:
+                    case SKIP_FILE:
+                    case AUTO_RENAME:
+                        config.setIfFileExistsAction(dialogAction);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                doAction = dialogAction;
             }
         }
         switch (doAction) {
         case SKIP_FILE:
-            switch (CFG_GENERAL.CFG.getOnSkipDueToAlreadyExistsAction()) {
+            /* Use the action chosen in the dialog's skip dropdown if present, otherwise the global config value. */
+            switch (dialogOnSkipAction != null ? dialogOnSkipAction : CFG_GENERAL.CFG.getOnSkipDueToAlreadyExistsAction()) {
             case SET_FILE_TO_SUCCESSFUL_MIRROR:
+                /*
+                 * TODO: Maybe check this in beforehand so that in the dialog, we can already hide the
+                 * "Skip & mark as finished if file is a mirror" option?
+                 */
                 if (fileInProgress != null) {
                     throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
                 }
@@ -4358,50 +4662,71 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                 /* We cannot overwrite a file that is currently in progress */
                 controller.getLogger().severe("Cannot overwrite file:" + fileOutput + " | Blocked by:" + fileInProgress);
                 throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
-            } else if (!fileOutput.delete()) {
+            }
+            if (!fileOutput.delete()) {
                 controller.getLogger().severe("Cannot overwrite file:" + fileOutput + " | Can't delete initial file");
                 throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
-            } else {
-                break;
             }
-        case AUTO_RENAME:
-            final String splitName[] = CrossSystem.splitFileName(fileOutput.getName());
+            if (alreadyExistingFile != null) {
+                /*
+                 * We were given an explicit target (e.g. the shortened too-long name) that the link does not carry yet -> now that we
+                 * overwrite it, continue the download with exactly that name.
+                 */
+                controller.setSessionDownloadFilename(fileOutput.getName());
+                downloadLink.setForcedFileName(fileOutput.getName());
+                downloadLink.setChunksProgress(null);
+            }
+            break;
+        case AUTO_RENAME: {
             final String downloadPath = fileOutput.getParent();
-            String extension = splitName[1];
-            if (extension == null) {
-                extension = "";
-            } else {
-                extension = "." + extension;
-            }
-            String name = splitName[0];
-            int duplicateFilenameCounter = 2;
-            final String alreadyDuplicated = new Regex(name, ".*_(\\d{1,5})$").getMatch(0);
-            if (alreadyDuplicated != null) {
-                /* it seems the file already got auto renamed! */
-                duplicateFilenameCounter = Integer.parseInt(alreadyDuplicated) + 1;
-                name = new Regex(name, "(.*)_\\d+$").getMatch(0);
-            }
             try {
-                File check = null;
                 String newName = null;
-                while (true) {
-                    newName = name + "_" + (duplicateFilenameCounter++) + extension;
-                    check = new File(downloadPath, newName);
-                    if (check.exists()) {
-                        check = null;
+                if (userDefinedFilename != null) {
+                    /*
+                     * The user entered/confirmed a specific new filename in the dialog. Use it as-is as long as it is still free (not
+                     * existing, not locked by another download) and within the allowed length; otherwise fall back to auto-generation.
+                     */
+                    final boolean fitsLength = maxFilenameLength <= 0 || userDefinedFilename.length() <= maxFilenameLength;
+                    if (fitsLength && isAutoRenameTargetFree(session, controller, new File(downloadPath, userDefinedFilename))) {
+                        newName = userDefinedFilename;
                     } else {
-                        for (SingleDownloadController downloadController : session.getControllers()) {
-                            if (downloadController == controller) {
-                                continue;
-                            }
-                            if (session.getFileAccessManager().isLockedBy(check, downloadController)) {
-                                check = null;
-                                break;
-                            }
-                        }
+                        controller.getLogger().info("User defined rename target not usable, falling back to auto-rename: " + userDefinedFilename);
                     }
-                    if (check != null) {
-                        break;
+                }
+                if (newName == null) {
+                    /* Auto-generate "<name>_<n>" until we find a free (non-existing, non-locked) name. */
+                    final String splitName[] = CrossSystem.splitFileName(fileOutput.getName());
+                    String extension = splitName[1];
+                    if (extension == null) {
+                        extension = "";
+                    } else {
+                        extension = "." + extension;
+                    }
+                    String name = splitName[0];
+                    int duplicateFilenameCounter = 2;
+                    final String alreadyDuplicated = new Regex(name, ".*_(\\d{1,5})$").getMatch(0);
+                    if (alreadyDuplicated != null) {
+                        /* it seems the file already got auto renamed! */
+                        duplicateFilenameCounter = Integer.parseInt(alreadyDuplicated) + 1;
+                        name = new Regex(name, "(.*)_\\d+$").getMatch(0);
+                    }
+                    /* Limit the number of auto-rename attempts so we never loop (near) endlessly when many variants already exist. */
+                    final int maxAutoRenameAttempts = 10;
+                    int autoRenameAttempt = 0;
+                    while (true) {
+                        if (autoRenameAttempt++ >= maxAutoRenameAttempts) {
+                            controller.getLogger().severe("Giving up auto-rename after " + maxAutoRenameAttempts + " attempts for:" + fileOutput.getName());
+                            throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
+                        }
+                        final String candidate = buildAutoRenameCandidate(name, extension, duplicateFilenameCounter++, maxFilenameLength);
+                        if (candidate == null) {
+                            /* Not even a minimal renamed filename fits into the allowed length -> give up. */
+                            throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
+                        }
+                        if (isAutoRenameTargetFree(session, controller, new File(downloadPath, candidate))) {
+                            newName = candidate;
+                            break;
+                        }
                     }
                 }
                 // we can do this, because the localFilecheck always runs BEFORE the download
@@ -4415,118 +4740,9 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
                 throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
             }
             break;
+        }
         default:
             throw new PluginException(LinkStatus.ERROR_ALREADYEXISTS);
-        }
-    }
-
-    public void fileNameTooLongHandling(final DownloadSession session, final SingleDownloadController controller) throws SkipReasonException, DeferredRunnableException, PluginException, InterruptedException, IOException {
-        final boolean allowCheckForPathLengthLimit = true;
-        if (!allowCheckForPathLengthLimit) {
-            return;
-        } else if (!DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
-            return;
-        } else if (!isWindowsPathLimitActive()) {
-            return;
-        }
-        final DownloadLink downloadLink = controller.getDownloadLink();
-        final File fileOutput = controller.getFileOutput(false, true);
-        /**
-         * We are close to the finish line! </br> We know that we can write in the directory but can we write the specific file we want to
-         * write? </br> The filename could still be too long!
-         */
-        File writeTest1 = fileOutput;
-        final List<File> processFiles = downloadLink.getDefaultPlugin().listProcessFiles(downloadLink);
-        if (processFiles != null) {
-            /*
-             * Get list of all possible files the related plugin could write and pick the longest one to perform our write-test. Typically
-             * this will be our temporary .part file.
-             */
-            int maxlen = fileOutput.getName().length();
-            for (final File file : processFiles) {
-                if (file.getName().length() > maxlen && !file.exists()) {
-                    maxlen = file.getName().length();
-                    writeTest1 = file;
-                }
-            }
-        }
-        final int maxPathLengthWindows = 259; // 260 but only 259 usable
-        try {
-            FilePathChecker.createFilePath(writeTest1);
-            /* Test-boolean to test this on OS which do not have any path limitations. */
-            final boolean devtestForceLongfilenameException = false;
-            if (devtestForceLongfilenameException && fileOutput.getAbsolutePath().length() > maxPathLengthWindows) {
-                throw new BadFilePathException(writeTest1, PathFailureReason.PATH_SEGMENT_TOO_LONG);
-            }
-        } catch (final BadFilePathException e) {
-            /* Looks like filename might be too long -> Check if writing a shortened filename would be possible. */
-            int maxFilenameLength = maxPathLengthWindows - fileOutput.getParentFile().getAbsolutePath().length();
-            final String filename = getFilename(controller);
-            if (fileOutput.getName().length() > filename.length()) {
-                /*
-                 * Name of write-test file was longer than name of filename -> Filename needs to be smaller to compensate for that.
-                 */
-                maxFilenameLength = maxFilenameLength - (fileOutput.getName().length() - filename.length());
-            }
-            final ParsedFilename pfname;
-            if (e.getReason() != PathFailureReason.PATH_SEGMENT_TOO_LONG) {
-                throw e;
-            } else if ((pfname = new jd.plugins.ParsedFilename(filename)).isMultipartArchive()) {
-                /* Do not offer auto filename shortening for multipart archive files. User needs to do this manually. */
-                throw e;
-            } else if (maxFilenameLength <= 0) {
-                /*
-                 * Does not look like too long filename -> Write-fail must have happened for a different reason, possibly permission problem
-                 * -> Give up.
-                 */
-                logger.info("Filename is too long according to Exception but it's not");
-                // throw e;
-                throw new SkipReasonException(SkipReason.INVALID_DESTINATION, e);
-            }
-            /* Shorten filename and try again */
-            final DownloadSession currentSession = getSession();
-            IfFilenameTooLongAction action = currentSession.getOnFilenameTooLongAction(downloadLink.getFilePackage());
-            if (action == IfFilenameTooLongAction.SKIP_FILE) {
-                /* User wants us to skip too long filenames. */
-                throw e;
-            }
-            final String autoShortenedFilename = LinknameCleaner.shortenFilename(pfname, maxFilenameLength);
-            String shortenedFilename = autoShortenedFilename;
-            if (shortenedFilename == null) {
-                logger.info("Shortening this filename is not possible");
-                throw e;
-            }
-            if (action == null || action == IfFilenameTooLongAction.ASK_FOR_EACH_FILE) {
-                final IfFilenameTooLongDialogInterface io = new IfFilenameTooLongDialog(downloadLink, pfname, shortenedFilename).show();
-                if (io.getCloseReason() == CloseReason.OK) {
-                    action = io.getAction();
-                } else {
-                    /* Timeout or dialog closed/ignored -> Do not auto rename */
-                    action = IfFilenameTooLongAction.SKIP_FILE;
-                }
-                if (io.isDontShowAgainSelected()) {
-                    currentSession.setOnFileFilenameTooLongAction(downloadLink.getFilePackage(), action);
-                } else {
-                    currentSession.setOnFileExistsAction(downloadLink.getFilePackage(), null);
-                }
-                /* TODO: Remove non-allowed chars from this string. */
-                shortenedFilename = io.getNewFilename();
-            }
-            if (IfFilenameTooLongAction.RENAME_FILE != action) {
-                /* No rename wished -> Dead end */
-                throw e;
-            } else if (shortenedFilename.length() > maxFilenameLength) {
-                /* E.g. user has entered too long file name in dialog */
-                logger.info("Shortened filename is still too long");
-                throw e;
-            } else if (new File(writeTest1.getParent(), shortenedFilename).exists()) {
-                logger.info("File with shortened filename already exists!");
-                throw new SkipReasonException(SkipReason.FILE_EXISTS);
-            }
-            /* Continue with shortened filename */
-            controller.setSessionDownloadFilename(shortenedFilename);
-            downloadLink.setForcedFileName(shortenedFilename);
-            downloadLink.setChunksProgress(null);
         }
     }
 
@@ -4699,34 +4915,36 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     }
 
     public void renameLink(final DownloadLink downloadLink, final String value) {
-        if (!StringUtils.equals(downloadLink.getForcedFileName(), value)) {
-            // logger.log(new Exception("Rename"));
-            logger.info("Requested Rename of " + downloadLink + " to " + value);
-            enqueueJob(new DownloadWatchDogJob() {
-                @Override
-                public void execute(DownloadSession currentSession) {
-                    if (!StringUtils.equals(downloadLink.getForcedFileName(), value)) {
-                        if (downloadLink.getDownloadLinkController() != null) {
-                            logger.info("Requested Rename of " + downloadLink + " to " + value + " DELAYED");
-                            downloadLink.setForcedFileName(value);
-                        } else if (downloadLink.getDefaultPlugin() != null) {
-                            logger.info("Requested Rename of " + downloadLink + " to " + value + " NOW");
-                            move(downloadLink, downloadLink.getParentNode().getDownloadDirectory(), downloadLink.getName(), downloadLink.getParentNode().getDownloadDirectory(), value);
-                            downloadLink.setForcedFileName(value);
-                        }
-                    }
-                }
-
-                @Override
-                public void interrupt() {
-                }
-
-                @Override
-                public boolean isHighPriority() {
-                    return false;
-                }
-            });
+        if (StringUtils.equals(downloadLink.getForcedFileName(), value)) {
+            return;
         }
+        // logger.log(new Exception("Rename"));
+        logger.info("Requested Rename of " + downloadLink + " to " + value);
+        enqueueJob(new DownloadWatchDogJob() {
+            @Override
+            public void execute(DownloadSession currentSession) {
+                if (StringUtils.equals(downloadLink.getForcedFileName(), value)) {
+                    return;
+                }
+                if (downloadLink.getDownloadLinkController() != null) {
+                    logger.info("Requested Rename of " + downloadLink + " to " + value + " DELAYED");
+                    downloadLink.setForcedFileName(value);
+                } else if (downloadLink.getDefaultPlugin() != null) {
+                    logger.info("Requested Rename of " + downloadLink + " to " + value + " NOW");
+                    move(downloadLink, downloadLink.getParentNode().getDownloadDirectory(), downloadLink.getName(), downloadLink.getParentNode().getDownloadDirectory(), value);
+                    downloadLink.setForcedFileName(value);
+                }
+            }
+
+            @Override
+            public void interrupt() {
+            }
+
+            @Override
+            public boolean isHighPriority() {
+                return false;
+            }
+        });
     }
 
     public void setStopMark(final Object stopEntry) {
@@ -4749,6 +4967,13 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
 
     public void handleMovedDownloadLinks(final FilePackage dest, final FilePackage source, final List<DownloadLink> links) {
         if (source == dest) {
+            return;
+        }
+        if (new File(source.getDownloadDirectory()).equals(new File(dest.getDownloadDirectory()))) {
+            /*
+             * Both packages resolve to the same download directory -> no file needs to be moved. Skip the whole per-link iteration
+             * (and its disk IO) instead of testing every single link.
+             */
             return;
         }
         enqueueJob(new DownloadWatchDogJob() {
@@ -4782,58 +5007,71 @@ public class DownloadWatchDog implements DownloadControllerListener, StateMachin
     }
 
     public void setDownloadDirectory(final FilePackage pkg, final String path) {
-        if (!new File(pkg.getDownloadDirectory()).equals(new File(path))) {
-            enqueueJob(new DownloadWatchDogJob() {
-                @Override
-                public void execute(DownloadSession currentSession) {
-                    final String old = pkg.getDownloadDirectory();
-                    if (new File(old).equals(new File(path))) {
-                        /* Path hasn't changed -> Do nothing */
-                        return;
-                    }
-                    pkg.setDownloadDirectory(path);
-                    boolean readL = pkg.getModifyLock().readLock();
-                    try {
-                        for (DownloadLink downloadLink : pkg.getChildren()) {
-                            if (downloadLink.getDownloadLinkController() != null) {
-                                // running
-                            } else if (downloadLink.getDefaultPlugin() != null) {
-                                move(downloadLink, old, downloadLink.getName(), path, null);
-                            }
-                        }
-                    } finally {
-                        pkg.getModifyLock().readUnlock(readL);
-                    }
-                }
-
-                @Override
-                public void interrupt() {
-                }
-
-                @Override
-                public boolean isHighPriority() {
-                    return false;
-                }
-            });
+        if (new File(pkg.getDownloadDirectory()).equals(new File(path))) {
+            /* Path hasn't changed -> Do nothing */
+            return;
         }
+        enqueueJob(new DownloadWatchDogJob() {
+            @Override
+            public void execute(DownloadSession currentSession) {
+                final String old = pkg.getDownloadDirectory();
+                if (new File(old).equals(new File(path))) {
+                    /* Path hasn't changed -> Do nothing */
+                    return;
+                }
+                pkg.setDownloadDirectory(path);
+                boolean readL = pkg.getModifyLock().readLock();
+                try {
+                    for (DownloadLink downloadLink : pkg.getChildren()) {
+                        if (downloadLink.getDownloadLinkController() != null) {
+                            // running
+                        } else if (downloadLink.getDefaultPlugin() != null) {
+                            move(downloadLink, old, downloadLink.getName(), path, null);
+                        }
+                    }
+                } finally {
+                    pkg.getModifyLock().readUnlock(readL);
+                }
+            }
+
+            @Override
+            public void interrupt() {
+            }
+
+            @Override
+            public boolean isHighPriority() {
+                return false;
+            }
+        });
     }
 
     protected void move(DownloadLink downloadLink, String oldDir, String oldName, String newDir, String newName) {
         try {
-            ArrayList<DownloadLinkCandidate> lst = new ArrayList<DownloadLinkCandidate>();
+            /*
+             * Decide whether anything actually needs to happen BEFORE touching the filesystem (disk space check). Moving many links between
+             * packages must not trigger per-link IO when no move/rename is going to happen.
+             */
+            final boolean sameDir = new File(oldDir).equals(new File(newDir));
+            final boolean sameName = StringUtils.equals(oldName, newName);
+            if (sameDir && (newName == null || sameName)) {
+                /* Neither directory nor name changed -> nothing to move or rename. */
+                return;
+            }
+            if (!sameDir && !CFG_GENERAL.CFG.isMoveFilesIfDownloadDestinationChangesEnabled()) {
+                logger.info("Cancel isMoveFilesIfDownloadDestinationChanges is false");
+                return;
+            }
+            if (sameDir && !sameName && !CFG_GENERAL.CFG.isRenameFilesIfDownloadLinkNameChangesEnabled()) {
+                logger.info("Cancel isRenameFilesIfDownloadLinkNameChangesEnabled is false");
+                return;
+            }
+            final ArrayList<DownloadLinkCandidate> lst = new ArrayList<DownloadLinkCandidate>();
             lst.add(new DownloadLinkCandidate(downloadLink, true));
             if (DISKSPACERESERVATIONRESULT.FAILED.equals(validateDiskFree(lst))) {
                 throw new IOException(_GUI.T.DownloadWatchDog_move_exception_disk_full(downloadLink.getFileOutput()));
             }
             logger.info("Move " + downloadLink);
             logger.info("From " + oldDir + "/" + oldName + " to " + newDir + "/" + newName);
-            if (!new File(oldDir).equals(new File(newDir)) && !CFG_GENERAL.CFG.isMoveFilesIfDownloadDestinationChangesEnabled()) {
-                logger.info("Cancel isMoveFilesIfDownloadDestinationChanges is false");
-                return;
-            }
-            if (new File(oldDir).equals(new File(newDir)) && !oldName.equals(newName) && !CFG_GENERAL.CFG.isRenameFilesIfDownloadLinkNameChangesEnabled()) {
-                logger.info("Cancel isRenameFilesIfDownloadLinkNameChangesEnabled is false");
-            }
             downloadLink.getDefaultPlugin().move(downloadLink, oldDir, oldName, newDir, newName);
             return;
         } catch (Throwable e) {

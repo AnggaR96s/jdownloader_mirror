@@ -43,6 +43,7 @@ import org.appwork.utils.net.httpserver.AbstractServerBasics;
 import org.appwork.utils.net.httpserver.ContentSecurityPolicy;
 import org.appwork.utils.net.httpserver.CorsHandler;
 import org.appwork.utils.net.httpserver.HeaderValidationRules;
+import org.appwork.utils.net.httpserver.OriginRule;
 import org.appwork.utils.net.httpserver.ReferrerPolicy;
 import org.appwork.utils.net.httpserver.ResponseSecurityHeaders;
 import org.appwork.utils.net.httpserver.XContentTypeOptions;
@@ -51,6 +52,7 @@ import org.appwork.utils.net.httpserver.handler.HttpRequestHandler;
 import org.appwork.utils.net.httpserver.requests.HttpRequest;
 import org.appwork.utils.net.httpserver.responses.HttpResponse;
 import org.appwork.utils.swing.dialog.DialogNoAnswerException;
+import org.bouncycastle.tls.TlsFatalAlertReceived;
 import org.bouncycastle.tls.TlsNoCloseNotifyException;
 import org.jdownloader.api.RemoteAPIConfig;
 import org.jdownloader.api.RemoteAPIController;
@@ -72,9 +74,16 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
         return INSTANCE;
     }
 
-    private final NullsafeAtomicReference<MyJDownloaderConnectThread> thread = new NullsafeAtomicReference<MyJDownloaderConnectThread>(null);
+    private final NullsafeAtomicReference<MyJDownloaderConnectThread> thread     = new NullsafeAtomicReference<MyJDownloaderConnectThread>(null);
     private final LogSource                                           logger;
     private final MyJDownloaderEventSender                            eventSender;
+    /*
+     * Guards the start()/stop() lifecycle. start() runs the sequence stop -> validate -> compareAndSet, which is not atomic on its own:
+     * without this lock two concurrent start() calls (GUI connect(), config event, connect thread onError, constructor) can interleave so
+     * that one call's stop() tears down the connection another call has just established. Serializing both methods on this monitor prevents
+     * that.
+     */
+    private final Object                                             startStopLock = new Object();
 
     public MyJDownloaderEventSender getEventSender() {
         return eventSender;
@@ -92,34 +101,34 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
 
     public MyJDownloaderConnectionStatus getConnectionStatus() {
         final MyJDownloaderConnectThread lThread = getConnectThread();
-        if (lThread != null) {
-            return lThread.getConnectionStatus();
-        } else {
+        if (lThread == null) {
             return MyJDownloaderConnectionStatus.UNCONNECTED;
         }
+        return lThread.getConnectionStatus();
     }
 
     public long getRetryTimeStamp() {
         final MyJDownloaderConnectThread lThread = getConnectThread();
-        if (lThread != null) {
-            return lThread.getRetryTimeStamp();
-        } else {
+        if (lThread == null) {
             return -1;
         }
+        return lThread.getRetryTimeStamp();
     }
 
     public int getEstablishedConnections() {
         final MyJDownloaderConnectThread lThread = getConnectThread();
-        if (lThread != null) {
-            return lThread.getEstablishedConnections();
-        } else {
+        if (lThread == null) {
             return 0;
         }
+        return lThread.getEstablishedConnections();
     }
 
     protected void stop() {
-        final MyJDownloaderConnectThread lThread = thread.getAndSet(null);
-        if (lThread != null) {
+        synchronized (startStopLock) {
+            final MyJDownloaderConnectThread lThread = thread.getAndSet(null);
+            if (lThread == null) {
+                return;
+            }
             ShutdownController.getInstance().removeShutdownVetoListener(this);
             new Thread("MyJDownloaderController:Stop:" + lThread) {
                 {
@@ -135,12 +144,16 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
 
     @Override
     public boolean onException(Throwable e, HttpRequest request, HttpResponse response) throws IOException {
-        if (Exceptions.containsInstanceOf(e, SocketException.class, TlsNoCloseNotifyException.class)) {
-            // TLS socket already closed
+        final TlsFatalAlertReceived tlsFatalAlertReceived = Exceptions.getInstanceof(e, TlsFatalAlertReceived.class);
+        if (tlsFatalAlertReceived != null && tlsFatalAlertReceived.getAlertDescription() == 42) {
+            /* bad_certificate(42) */
             return true;
-        } else {
-            return super.onException(e, request, response);
         }
+        if (Exceptions.containsInstanceOf(e, SocketException.class, TlsNoCloseNotifyException.class)) {
+            /* TLS socket already closed */
+            return true;
+        }
+        return super.onException(e, request, response);
     }
 
     public final boolean isAlwaysConnectRequired() {
@@ -158,7 +171,7 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
         } else {
             chunked = false;
         }
-        final boolean wrapJQuery = StringUtils.containsIgnoreCase(response.getResponseHeaders().getValue(HTTPConstants.HEADER_RESPONSE_CONTENT_TYPE), "application/json") && request != null && request.getJqueryCallback() != null;
+        final boolean wrapJQuery = StringUtils.containsIgnoreCase(response.getResponseHeaders().getValue(HTTPConstants.HEADER_RESPONSE_CONTENT_TYPE), "application/json") && request.getJqueryCallback() != null;
         final boolean gzip = RemoteAPI.gzip(request);
         if (gzip) {
             response.getResponseHeaders().add(new HTTPHeader(HTTPConstants.HEADER_RESPONSE_CONTENT_ENCODING, "gzip"));
@@ -252,6 +265,7 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
                 setAllowMethods(RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS);
                 setAllowHeadersFromRequest(true);
                 addPrivateNetworkRequestRule(Pattern.compile(".*"), true);
+                setAllowedOrigins(new OriginRule("*"));
             }
 
             @Override
@@ -306,6 +320,12 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
     }
 
     protected void start() {
+        synchronized (startStopLock) {
+            startLocked();
+        }
+    }
+
+    private void startLocked() {
         stop();
         String email = CFG_MYJD.CFG.getEmail();
         String password = CFG_MYJD.CFG.getPassword();
@@ -320,7 +340,12 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
                         break;
                     }
                 } catch (DialogNoAnswerException e) {
+                    /*
+                     * The user chose to exit JDownloader instead of entering logins. Request shutdown and stop looping so we do not
+                     * re-prompt while shutdown is being processed asynchronously.
+                     */
                     ShutdownController.getInstance().requestShutdown(new ExceptionShutdownRequest(e, false, false));
+                    return;
                 }
             }
         }
@@ -340,27 +365,24 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
         final MyJDownloaderConnectThread th = getConnectThread();
         if (th == null || !th.isAlive() || !th.isConnected()) {
             return null;
-        } else {
-            return th.getDeviceName();
         }
+        return th.getDeviceName();
     }
 
     public String getCurrentEmail() {
         final MyJDownloaderConnectThread th = getConnectThread();
         if (th == null || !th.isAlive() || !th.isConnected()) {
             return null;
-        } else {
-            return th.getEmail();
         }
+        return th.getEmail();
     }
 
     public String getCurrentPassword() {
         final MyJDownloaderConnectThread th = getConnectThread();
         if (th == null || !th.isAlive() || !th.isConnected()) {
             return null;
-        } else {
-            return th.getPassword();
         }
+        return th.getPassword();
     }
 
     public MyJDownloaderConnectThread getConnectThread() {
@@ -506,38 +528,38 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
     public boolean validateAndVerifyLogins(final String email, final String password, final boolean verifyLogins) {
         if (StringUtils.isEmpty(password) || StringUtils.isEmpty(email) || !new Regex(email, "..*?@.*?\\..+").matches()) {
             return false;
-        } else {
-            if (!verifyLogins) {
-                return true;
-            } else {
-                final AtomicBoolean validFlag = new AtomicBoolean(false);
-                final MyJDownloaderAPI api = new MyJDownloaderAPI() {
-                    public LogSource getLogger() {
-                        return MyJDownloaderController.this.getLogger();
-                    };
-                };
-                final Thread validateThread = new Thread("validateLogins") {
-                    @Override
-                    public void run() {
-                        try {
-                            api.connect(email, password);
-                            validFlag.set(true);
-                            api.disconnect();
-                        } catch (Exception e) {
-                            api.getLogger().log(e);
-                        }
-                    }
-                };
-                validateThread.setDaemon(true);
-                validateThread.start();
+        }
+        if (!verifyLogins) {
+            return true;
+        }
+        final AtomicBoolean validFlag = new AtomicBoolean(false);
+        final MyJDownloaderAPI api = new MyJDownloaderAPI() {
+            public LogSource getLogger() {
+                return MyJDownloaderController.this.getLogger();
+            };
+        };
+        final Thread validateThread = new Thread("validateLogins") {
+            @Override
+            public void run() {
                 try {
-                    validateThread.join();
-                } catch (InterruptedException e) {
+                    api.connect(email, password);
+                    validFlag.set(true);
+                    api.disconnect();
+                } catch (Exception e) {
                     api.getLogger().log(e);
                 }
-                return validFlag.get();
             }
+        };
+        validateThread.setDaemon(true);
+        validateThread.start();
+        try {
+            validateThread.join();
+        } catch (InterruptedException e) {
+            api.getLogger().log(e);
+            /* Restore the interrupt status so callers up the stack can still observe the interruption. */
+            Thread.currentThread().interrupt();
         }
+        return validFlag.get();
     }
 
     public boolean isLoginValid(final boolean verifyLogin) {
@@ -550,43 +572,47 @@ public class MyJDownloaderController extends AbstractServerBasics implements Shu
      * @param captchasPending
      */
     public void pushCaptchaFlag(boolean captchasPending) {
-        if (isConnected()) {
-            final MyJDownloaderConnectThread th = getConnectThread();
-            if (th != null) {
-                th.pushCaptchaNotification(captchasPending);
-            }
+        if (!isConnected()) {
+            return;
         }
+        final MyJDownloaderConnectThread th = getConnectThread();
+        if (th == null) {
+            return;
+        }
+        th.pushCaptchaNotification(captchasPending);
     }
 
     public boolean isSessionValid(final String sessionToken) {
         final MyJDownloaderConnectThread ct = getConnectThread();
-        return ct != null && ct.isSessionValid(sessionToken);
+        if (ct == null) {
+            return false;
+        }
+        return ct.isSessionValid(sessionToken);
     }
 
     public boolean sendChallengeFeedback(String id, RESULT correct) throws MyJDownloaderException {
         final MyJDownloaderConnectThread th = getConnectThread();
         if (th == null) {
             throw new UnconnectedException();
-        } else {
-            if (th.isAlive()) {
-                switch (th.getConnectionStatus()) {
-                case CONNECTED:
-                case PENDING:
-                    return th.sendChallengeFeedback(id, correct);
-                default:
-                    return false;
-                }
-            } else {
-                return false;
-            }
+        }
+        if (!th.isAlive()) {
+            return false;
+        }
+        switch (th.getConnectionStatus()) {
+        case CONNECTED:
+        case PENDING:
+            return th.sendChallengeFeedback(id, correct);
+        default:
+            return false;
         }
     }
 
     public void terminateSession(String connectToken) throws MyJDownloaderException {
         final MyJDownloaderConnectThread ct = getConnectThread();
-        if (ct != null) {
-            ct.terminateSession(connectToken);
+        if (ct == null) {
+            return;
         }
+        ct.terminateSession(connectToken);
     }
 
     @Override

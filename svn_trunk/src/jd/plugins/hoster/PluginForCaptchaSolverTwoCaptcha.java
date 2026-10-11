@@ -1,15 +1,8 @@
 package jd.plugins.hoster;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import jd.PluginWrapper;
-import jd.controlling.AccountController;
-import jd.plugins.Account;
-import jd.plugins.CaptchaType.CAPTCHA_TYPE;
-import jd.plugins.HostPlugin;
 
 import org.appwork.utils.Time;
 import org.jdownloader.captcha.v2.challenge.hcaptcha.HCaptchaChallenge;
@@ -17,9 +10,27 @@ import org.jdownloader.plugins.components.captchasolver.abstractPluginForCaptcha
 import org.jdownloader.plugins.components.config.CaptchaSolverPluginConfigTwoCaptcha;
 import org.jdownloader.plugins.controller.LazyPlugin;
 
-@HostPlugin(revision = "$Revision: 52580 $", interfaceVersion = 3, names = { "2captcha.com" }, urls = { "" })
+import jd.PluginWrapper;
+import jd.controlling.AccountController;
+import jd.plugins.Account;
+import jd.plugins.CaptchaType.CAPTCHA_TYPE;
+import jd.plugins.HostPlugin;
+
+@HostPlugin(revision = "$Revision: 53540 $", interfaceVersion = 3, names = { "2captcha.com" }, urls = { "" })
 public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSolverTwoCaptchaAPIV2 {
-    private final Map<Account, Object> hcaptcha_account_status_map = new HashMap<Account, Object>();
+    /**
+     * hCaptcha support is cached per account via account properties (not an instance field): abstractPluginForCaptchaSolver creates a fresh
+     * plugin instance for every single challenge (see getPluginChallengeSolver()), so an instance field would never actually persist
+     * anything across solve attempts. <br>
+     * 2026-10-07: I've tested hCaptcha again with 3 different accounts, here are my findings: <br>
+     * 1. I was able to submit hCaptcha challenges just fine with all accounts. <br>
+     * 2. They timed out each time with: {"errorId":12,"errorCode":"ERROR_CAPTCHA_UNSOLVABLE","errorDescription":"Workers could not solve
+     * the Captcha"} <br>
+     * This could mean different things, especially that the special handling for hCaptcha might not be needed anymore but we'll leave it
+     * for now.
+     */
+    private static final String PROPERTY_HCAPTCHA_SUPPORTED              = "hcaptcha_supported";
+    private static final String PROPERTY_HCAPTCHA_LAST_FAILURE_TIMESTAMP = "hcaptcha_last_failure_timestamp";
 
     @Override
     public LazyPlugin.FEATURE[] getFeatures() {
@@ -32,7 +43,6 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
 
     @Override
     public String getBuyPremiumUrl() {
-        // TODO: Remove this ref-link as it belongs into the server side ref link handling
         return "https://" + getHost() + "?from=15779444";
     }
 
@@ -46,8 +56,10 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2);
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2_ENTERPRISE);
         types.add(CAPTCHA_TYPE.RECAPTCHA_V2_INVISIBLE);
-        /*
+        /**
          * 2025-12-22: hCaptcha is officially not supported anymore. Some accounts support it -> Add it if at least one account supports it.
+         * <br>
+         * TODO: 2026-10-06: Special handling is currently broken because the line below this one returns null in download mode.
          */
         final List<Account> accounts = AccountController.getInstance().getValidAccounts(this.getHost());
         if (accounts != null && accounts.size() > 0) {
@@ -64,9 +76,15 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
             }
         }
         types.add(CAPTCHA_TYPE.CLOUDFLARE_TURNSTILE);
-        types.add(CAPTCHA_TYPE.MT_CAPTCHA);
-        types.add(CAPTCHA_TYPE.GEETEST_V1);
-        types.add(CAPTCHA_TYPE.GEETEST_V4);
+        /*
+         * 2026-09-24: 2captcha's API does offer MtCaptchaTaskProxyless/GeeTestTaskProxyless, but solve() (in
+         * abstractPluginForCaptchaSolverTwoCaptchaAPIV2) has no request handling for them yet, so they are NOT declared here. Declaring
+         * them without a matching solve() branch would make solve() throw for such a challenge. Re-add together with the corresponding
+         * solve() handling.
+         */
+        // types.add(CAPTCHA_TYPE.MT_CAPTCHA);
+        // types.add(CAPTCHA_TYPE.GEETEST_V1);
+        // types.add(CAPTCHA_TYPE.GEETEST_V4);
         return types;
     }
 
@@ -83,33 +101,17 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
 
     /* Returns true if account supports hCaptcha. */
     private Boolean supportsHcaptcha(final Account account) {
-        final Object hcStatus = hcaptcha_account_status_map.get(account);
-        if (hcStatus == null) {
-            /* hCaptcha status hasn't been evaluated yet */
-            return null;
-        }
-        if (hcStatus == Boolean.TRUE) {
-            /* Account supports hCaptcha */
+        final Object hc_supported = account.getProperty(PROPERTY_HCAPTCHA_SUPPORTED);
+        if (hc_supported instanceof Boolean) {
             return Boolean.TRUE;
         }
-        /* Last failure timestamp must be given -> We know that this account doesn't support hCaptcha */
-        return Boolean.FALSE;
+        if (account.hasProperty(PROPERTY_HCAPTCHA_LAST_FAILURE_TIMESTAMP)) {
+            /* Last failure timestamp is given -> We know that this account doesn't support hCaptcha */
+            return Boolean.FALSE;
+        }
+        /* hCaptcha status hasn't been evaluated yet */
+        return null;
     }
-
-    /* Returns true if any account supported hCaptcha in current session */
-    // private Boolean supportsHcaptcha() {
-    // synchronized (hcaptcha_account_status_map) {
-    // if (hcaptcha_account_status_map.isEmpty()) {
-    // return null;
-    // }
-    // for (final Object valueO : hcaptcha_account_status_map.values()) {
-    // if (valueO instanceof Boolean) {
-    // return Boolean.TRUE;
-    // }
-    // }
-    // return Boolean.FALSE;
-    // }
-    // }
 
     protected String getApiBase() {
         return "https://api." + getHost();
@@ -145,7 +147,7 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
         if (errorId == 0) {
             /* No error */
             if (this.getCurrentCaptchaChallenge() instanceof HCaptchaChallenge) {
-                hcaptcha_account_status_map.put(account, true);
+                account.setProperty(PROPERTY_HCAPTCHA_SUPPORTED, true);
             }
             return;
         }
@@ -154,8 +156,7 @@ public class PluginForCaptchaSolverTwoCaptcha extends abstractPluginForCaptchaSo
             /* Special hCaptcha handling. This should only happen once per session. */
             /* Example response: {"errorId":5,"errorCode":"ERROR_METHOD_CALL","errorDescription":"Error"} */
             logger.info("hCaptcha is not supported by this 2captcha API key");
-            hcaptcha_account_status_map.put(account, Time.systemIndependentCurrentJVMTimeMillis());
-            // lastTimestampHcaptchaWorking.set(0);
+            account.setProperty(PROPERTY_HCAPTCHA_LAST_FAILURE_TIMESTAMP, Time.systemIndependentCurrentJVMTimeMillis());
         }
         super.handleAPIErrors(entries, account);
     }

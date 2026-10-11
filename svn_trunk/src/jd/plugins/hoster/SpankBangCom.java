@@ -19,11 +19,6 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 
-import org.appwork.utils.StringUtils;
-import org.jdownloader.downloader.hls.HLSDownloader;
-import org.jdownloader.gui.translate._GUI;
-import org.jdownloader.plugins.controller.LazyPlugin;
-
 import jd.PluginWrapper;
 import jd.config.ConfigContainer;
 import jd.config.ConfigEntry;
@@ -47,7 +42,12 @@ import jd.plugins.PluginException;
 import jd.plugins.PluginForHost;
 import jd.plugins.decrypter.SpankBangComCrawler;
 
-@HostPlugin(revision = "$Revision: 52320 $", interfaceVersion = 2, names = {}, urls = {})
+import org.appwork.utils.StringUtils;
+import org.jdownloader.downloader.hls.HLSDownloader;
+import org.jdownloader.gui.translate._GUI;
+import org.jdownloader.plugins.controller.LazyPlugin;
+
+@HostPlugin(revision = "$Revision: 53513 $", interfaceVersion = 2, names = {}, urls = {})
 @PluginDependencies(dependencies = { SpankBangComCrawler.class })
 public class SpankBangCom extends PluginForHost {
     public SpankBangCom(PluginWrapper wrapper) {
@@ -137,7 +137,7 @@ public class SpankBangCom extends PluginForHost {
 
     public AvailableStatus requestFileInformation(final DownloadLink link, final Account account) throws Exception {
         this.setBrowserExclusive();
-        SpankBangComCrawler.prepBR(br);
+        SpankBangComCrawler.prepBR(this, br);
         if (account != null) {
             this.login(account, false);
         }
@@ -148,12 +148,13 @@ public class SpankBangCom extends PluginForHost {
         if (isValidURL(br, link, dllink)) {
             return AvailableStatus.TRUE;
         }
-        final String mainlink = link.getStringProperty(PROPERTY_MAINLINK);
+        String mainlink = link.getStringProperty(PROPERTY_MAINLINK);
         final String quality = link.getStringProperty(PROPERTY_QUALITY);
         if (mainlink == null || quality == null) {
             /* Missing property - this should not happen! */
             throw new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND);
         }
+        mainlink = SpankBangComCrawler.rewriteHost(this, mainlink);
         br.getPage(mainlink);
         if (SpankBangComCrawler.isOffline(this.br)) {
             /* Main videolink offline --> Offline */
@@ -161,7 +162,7 @@ public class SpankBangCom extends PluginForHost {
         }
         setFilename(link);
         /* Main videolink online --> Refresh directlink ... */
-        final LinkedHashMap<String, String> foundQualities = SpankBangComCrawler.findQualities(this.br, mainlink);
+        final LinkedHashMap<String, String> foundQualities = SpankBangComCrawler.findQualities(this, this.br, mainlink);
         if (foundQualities != null) {
             dllink = foundQualities.get(quality);
         }

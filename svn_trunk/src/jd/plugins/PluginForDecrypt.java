@@ -48,7 +48,6 @@ import org.jdownloader.captcha.blacklist.CaptchaBlackList;
 import org.jdownloader.captcha.v2.Challenge;
 import org.jdownloader.captcha.v2.Challenge.CaptchaRequestType;
 import org.jdownloader.captcha.v2.ChallengeResponseController;
-import org.jdownloader.captcha.v2.challenge.clickcaptcha.ClickCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.clickcaptcha.ClickedPoint;
 import org.jdownloader.captcha.v2.challenge.multiclickcaptcha.MultiClickCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.multiclickcaptcha.MultiClickedPoint;
@@ -69,7 +68,6 @@ import org.jdownloader.plugins.controller.host.LazyHostPlugin;
 import org.jdownloader.translate._JDT;
 
 import jd.PluginWrapper;
-import jd.config.SubConfiguration;
 import jd.controlling.ProgressController;
 import jd.controlling.captcha.CaptchaSettings;
 import jd.controlling.captcha.SkipException;
@@ -108,11 +106,6 @@ public abstract class PluginForDecrypt extends Plugin {
      */
     public LinkCrawlerDistributer getDistributer() {
         return distributer;
-    }
-
-    @Override
-    public SubConfiguration getPluginConfig() {
-        return SubConfiguration.getConfig(lazyC.getDisplayName());
     }
 
     @Override
@@ -249,8 +242,8 @@ public abstract class PluginForDecrypt extends Plugin {
      * @return
      * @since JD2
      * @author raztoki
-     * @deprecated Do not create offline placeholder links. Throw
-     *             <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead to signal that the content is offline.
+     * @deprecated Do not create offline placeholder links. Throw <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead
+     *             to signal that the content is offline.
      */
     @Deprecated
     protected DownloadLink createOfflinelink(final String link) {
@@ -265,8 +258,8 @@ public abstract class PluginForDecrypt extends Plugin {
      * @return
      * @since JD2
      * @author raztoki
-     * @deprecated Do not create offline placeholder links. Throw
-     *             <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead to signal that the content is offline.
+     * @deprecated Do not create offline placeholder links. Throw <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead
+     *             to signal that the content is offline.
      */
     @Deprecated
     protected DownloadLink createOfflinelink(final String link, final String message) {
@@ -281,8 +274,8 @@ public abstract class PluginForDecrypt extends Plugin {
      * @param message
      * @since JD2
      * @author raztoki
-     * @deprecated Do not create offline placeholder links. Throw
-     *             <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead to signal that the content is offline.
+     * @deprecated Do not create offline placeholder links. Throw <code>new PluginException(LinkStatus.ERROR_FILE_NOT_FOUND)</code> instead
+     *             to signal that the content is offline.
      */
     @Deprecated
     protected DownloadLink createOfflinelink(final String link, final String filename, final String message) {
@@ -688,8 +681,14 @@ public abstract class PluginForDecrypt extends Plugin {
 
     protected ClickedPoint getCaptchaClickedPoint(String method, File file, final CryptedLink link, String explain) throws Exception {
         final File copy = copyCaptcha(method, file);
-        final ClickCaptchaChallenge c = new ClickCaptchaChallenge(copy, explain, this);
-        return handleCaptchaChallenge(c);
+        /* A single click captcha is a click captcha with exactly one click. */
+        final MultiClickCaptchaChallenge c = new MultiClickCaptchaChallenge(copy, explain, this, 1);
+        final MultiClickedPoint result = handleCaptchaChallenge(c);
+        if (result == null) {
+            /* Skipped, see handleSkipException */
+            return null;
+        }
+        return new ClickedPoint(result.getX()[0], result.getY()[0]);
     }
 
     protected MultiClickedPoint getMultiCaptchaClickedPoint(final File file, final CryptedLink link, final String explain) throws Exception {

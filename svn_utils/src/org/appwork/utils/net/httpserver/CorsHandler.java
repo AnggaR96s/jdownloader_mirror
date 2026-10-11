@@ -264,8 +264,8 @@ public class CorsHandler {
         this.validate();
     }
 
-    public final void setAllowMethods(RequestMethod... methods) {
-        setAllowMethods(new HashSet<RequestMethod>(Arrays.asList(methods)));
+    public void setAllowedOrigins(final OriginRule... allowedOrigins) {
+        setAllowedOrigins(allowedOrigins == null ? null : Arrays.asList(allowedOrigins));
     }
 
     /**
@@ -355,6 +355,10 @@ public class CorsHandler {
         } else {
             this.allowMethods = null;
         }
+    }
+
+    public void setAllowMethods(final RequestMethod... allowMethods) {
+        setAllowMethods(allowMethods == null ? null : new HashSet<RequestMethod>(Arrays.asList(allowMethods)));
     }
 
     /**

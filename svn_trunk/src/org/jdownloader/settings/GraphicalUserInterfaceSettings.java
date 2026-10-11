@@ -6,6 +6,8 @@ import java.text.NumberFormat;
 import java.util.HashMap;
 import java.util.Map;
 
+import jd.controlling.downloadcontroller.IfFilenameTooLongDialog.IfFilenameTooLongAction;
+
 import org.appwork.storage.Storable;
 import org.appwork.storage.config.ConfigInterface;
 import org.appwork.storage.config.annotations.AboutConfig;
@@ -117,8 +119,15 @@ public interface GraphicalUserInterfaceSettings extends ConfigInterface {
 
     FrameStatus getLastFrameStatus();
 
+    @AboutConfig
     @DefaultEnumValue("SKIP_FILE")
     IfFileExistsAction getLastIfFileExists();
+
+    @AboutConfig
+    @DefaultEnumValue("AUTO_RENAME")
+    IfFilenameTooLongAction getLastIfFilenameTooLong();
+
+    void setLastIfFilenameTooLong(IfFilenameTooLongAction value);
 
     @AboutConfig
     public String getPassword();
@@ -686,12 +695,27 @@ public interface GraphicalUserInterfaceSettings extends ConfigInterface {
             }
         }
 
+        @Deprecated
+        public static final String formatValue(SIZEUNIT maxSizeUnit, final long fileSize) {
+            return formatValue((SizeUnitInterface) maxSizeUnit, fileSize);
+        }
+
         public static final String formatValue(SizeUnitInterface maxSizeUnit, final long fileSize) {
             return formatValue(maxSizeUnit, new DecimalFormat(), fileSize);
         }
 
+        @Deprecated
+        public static final String formatValue(SIZEUNIT maxSizeUnit, final DecimalFormat formatter, final long fileSize) {
+            return formatValue((SizeUnitInterface) maxSizeUnit, (NumberFormat) formatter, fileSize);
+        }
+
         public static final String formatValue(SizeUnitInterface maxSizeUnit, final DecimalFormat formatter, final long fileSize) {
             return formatValue(maxSizeUnit, (NumberFormat) formatter, fileSize);
+        }
+
+        @Deprecated
+        public static final String formatValue(final SIZEUNIT maxSizeUnit, final NumberFormat formatter, final long fileSize) {
+            return formatValue((SizeUnitInterface) maxSizeUnit, formatter, fileSize);
         }
 
         public static final String formatValue(final SizeUnitInterface maxSizeUnit, final NumberFormat formatter, final long fileSize) {

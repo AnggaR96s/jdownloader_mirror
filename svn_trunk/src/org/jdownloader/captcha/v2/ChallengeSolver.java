@@ -3,33 +3,39 @@ package org.jdownloader.captcha.v2;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 import org.appwork.exceptions.WTFException;
-import org.appwork.utils.StringUtils;
+import org.appwork.storage.config.annotations.LabelInterface;
 import org.jdownloader.captcha.v2.solver.jac.SolverException;
 import org.jdownloader.captcha.v2.solverjob.SolverJob;
+import org.jdownloader.gui.translate._GUI;
+import org.jdownloader.settings.staticreferences.CFG_CAPTCHA;
 
 import jd.controlling.captcha.SkipException;
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
-import jd.plugins.Plugin;
 
 public abstract class ChallengeSolver<T> {
     public static final ChallengeSolver EXTERN = new ChallengeSolver<Object>() {
         @Override
         public void solve(SolverJob<Object> solverJob) throws InterruptedException, SolverException, SkipException {
             throw new WTFException("Not Implemented");
+        }
+
+        @Override
+        public SolverType getSolverType() {
+            return SolverType.EXTERNAL;
+        }
+
+        @Override
+        public List<CAPTCHA_TYPE> getSupportedCaptchaTypes() {
+            /* Placeholder solver that never receives challenges. */
+            return new ArrayList<CAPTCHA_TYPE>();
         }
     };
 
@@ -39,11 +45,39 @@ public abstract class ChallengeSolver<T> {
         ABORT_CAPTCHAS
     }
 
-    public enum SolverType {
-        JD_LOCAL,
-        JD_LOCAL_BROWSER,
-        JD_REMOTE_API,
-        EXTERNAL
+    public enum SolverType implements LabelInterface {
+        /** Local automatic solver (no user interaction), e.g. JAC. */
+        JD_LOCAL {
+            @Override
+            public String getLabel() {
+                return _GUI.T.JACSolver_getName_();
+            }
+        },
+        /** Local dialog solver: a human solves the captcha in a JDownloader dialog. */
+        JD_LOCAL_DIALOG {
+            @Override
+            public String getLabel() {
+                return _GUI.T.DialogBasicCaptchaSolver_getName();
+            }
+        },
+        JD_LOCAL_BROWSER {
+            @Override
+            public String getLabel() {
+                return _GUI.T.BrowserSolverService_getName();
+            }
+        },
+        JD_REMOTE_API {
+            @Override
+            public String getLabel() {
+                return _GUI.T.CaptchaAPISolver_getName();
+            }
+        },
+        EXTERNAL {
+            @Override
+            public String getLabel() {
+                return _GUI.T.CaptchaSolverService_type();
+            }
+        }
     }
 
     public enum ChallengeVetoReason {
@@ -57,7 +91,14 @@ public abstract class ChallengeSolver<T> {
         CAPTCHA_TYPE_DISABLED_BY_USER,
         ACCOUNT_DISABLED,
         ACCOUNT_IN_ERROR_STATE,
-        ACCOUNT_NOT_ENOUGH_CREDITS
+        ACCOUNT_NOT_ENOUGH_CREDITS,
+        /** One of the solver's enabled custom limit rules (max captchas per time interval) is currently used up. */
+        CUSTOM_LIMIT_REACHED,
+        /**
+         * The user globally disabled external (plugin based) captcha solver accounts, see
+         * GeneralSettings#isUseAvailableCaptchaSolverAccounts.
+         */
+        EXTERNAL_SOLVER_ACCOUNTS_DISABLED
     }
 
     protected ChallengeSolver() {
@@ -70,20 +111,20 @@ public abstract class ChallengeSolver<T> {
 
     /**
      * Returns the list of captcha types supported by this solver. <br>
+     * Every solver that solves captchas must return a non-empty list: a null or empty list means "supports no captcha type at all" and is
+     * treated as a bug, see {@link #getChallengeVetoReason(Challenge)} which vetoes every captcha challenge for such a solver. The only
+     * solvers which legitimately return an empty list are those that never receive challenges with a {@link CAPTCHA_TYPE}, e.g. the OAuth
+     * solvers. <br>
      * Important: If a solver supports all reCaptcha captcha types, return RECAPTCHA_V2, RECAPTCHA_V2_ENTERPRISE AND RECAPTCHA_V2_INVISIBLE
      * !
      *
      * @return List of supported captcha types
      */
-    public List<CAPTCHA_TYPE> getSupportedCaptchaTypes() {
-        // TODO: Make this abstract
-        return null;
-    }
+    public abstract List<CAPTCHA_TYPE> getSupportedCaptchaTypes();
 
-    /* Returns type of solver e.g. browser solver, local image solver or external solver. */
+    /* Returns type of solver e.g. browser solver, local image solver or external solver. Defined by the solver's service. */
     public SolverType getSolverType() {
-        // TODO: Make this abstract
-        return null;
+        return getService().getType();
     }
 
     /**
@@ -150,7 +191,7 @@ public abstract class ChallengeSolver<T> {
     }
 
     public boolean isEnabled() {
-        return getService().getConfig().isEnabled();
+        return getService().getConfigV3().isEnabled();
     }
 
     public List<SolverJob<T>> listJobs() {
@@ -232,7 +273,11 @@ public abstract class ChallengeSolver<T> {
         }
         final List<CAPTCHA_TYPE> supported_types = this.getSupportedCaptchaTypes();
         final CAPTCHA_TYPE ctype = CAPTCHA_TYPE.getCaptchaTypeForChallenge(c);
-        if (supported_types != null && ctype != null) {
+        if (ctype != null) {
+            if (supported_types == null || supported_types.isEmpty()) {
+                /* Solver does not declare any supported captcha type (bug in solver implementation) -> Cannot solve any captcha. */
+                return ChallengeVetoReason.UNSUPPORTED_BY_SOLVER;
+            }
             final List<CAPTCHA_TYPE> disabled_types = this.getUserDisabledCaptchaTypes();
             if (disabled_types != null && supported_types.contains(ctype) && disabled_types.contains(ctype)) {
                 /* Captcha type is supported by plugin but user has disabled this captcha type for this account. */
@@ -247,185 +292,87 @@ public abstract class ChallengeSolver<T> {
             // TODO: fix possible NPE in above condition, getResultType should never return null?
             // This should never happen?!
             return ChallengeVetoReason.UNSUITABLE_FOR_SOLVER;
-        } else if (!validateChallengeFilters(c)) {
+        }
+        /* Check for filter list entry. */
+        final CaptchaChallengeFilterResult filterResult = validateChallengeFilters(c);
+        switch (filterResult) {
+        case FILTERED_BLACKLIST:
             return ChallengeVetoReason.CHALLENGE_BLACKLISTED;
-        } else {
+        case FILTERED_WHITELIST:
+        case NOT_FILTERED:
+        default:
             return null;
         }
     }
 
-    public boolean isFilterListEnabled() {
-        // TODO: Make this abstract
-        // TODO: Migrate to new captcha solver config system
-        return getService().getConfig().isBlackWhiteListingEnabled();
-    }
-
-    public List<CaptchaChallengeFilter> getCaptchaChallengeFilterList() {
-        // TODO: Make this abstract
-        return null;
-    }
-
     /**
-     * Validates challenge against CaptchaChallengeFilter list. Returns true if challenge is allowed, false if blocked.
+     * Evaluates the challenge against the central {@link CaptchaChallengeFilterController}, using this solver's id (
+     * {@link SolverService#getID()}) as solver id.
      *
      * @param c
      *            Challenge to validate
-     * @return true if allowed, false if blocked
+     * @return the filter result: NOT_FILTERED, FILTERED_BLACKLIST or FILTERED_WHITELIST
      */
-    protected boolean validateChallengeFilters(final Challenge<?> c) {
-        if (!this.isFilterListEnabled()) {
-            /* Filter list disabled by user -> No need to check */
-            return true;
-        }
-        final List<CaptchaChallengeFilter> filters = this.getCaptchaChallengeFilterList();
-        if (filters == null || filters.isEmpty()) {
-            /* No filters configured -> Allow */
-            return true;
-        }
-        /* Check each filter in order (sorted by position) */
-        for (int i = 0; i < filters.size(); i++) {
-            final CaptchaChallengeFilter filter = filters.get(i);
-            if (!filter._isValid()) {
-                /* Skip invalid filters */
-                continue;
-            }
-            final CompiledCaptchaChallengeFilter compiledFilter = new CompiledCaptchaChallengeFilter(filter);
-            if (!compiledFilter.isValid()) {
-                /* Skip invalid/disabled/broken filters */
-                continue;
-            }
-            if (!compiledFilter.matches(c)) {
-                /* Filter doesn't match this challenge */
-                continue;
-            }
-            /* Filter matches - apply action */
-            if (compiledFilter.getFilterType() == CaptchaChallengeFilter.CaptchaFilterType.BLACKLIST) {
-                return false;
-            } else {
-                /* WHITELIST */
-                return true;
-            }
-        }
-        /* No filter matched -> default behavior: allow */
-        return true;
-    }
-
-    public boolean isDomainBlacklistEnabled() {
-        // TODO: Migrate to new captcha solver config system
-        return getService().getConfig().isBlackWhiteListingEnabled();
-    }
-
-    public List<String> getBlacklistedDomains() {
-        return getService().getConfig().getBlacklistEntries();
-    }
-
-    public boolean isDomainWhitelistEnabled() {
-        // TODO: Migrate to new captcha solver config system
-        return getService().getConfig().isBlackWhiteListingEnabled();
-    }
-
-    public List<String> getWhitelistedDomains() {
-        return getService().getConfig().getWhitelistEntries();
+    protected CaptchaChallengeFilterResult validateChallengeFilters(final Challenge<?> c) {
+        return CaptchaChallengeFilterController.getInstance().getFilterResult(c, getService().getID());
     }
 
     /**
-     * returns true for whitelisted and false for blacklisted
-     *
-     * @param c
-     * @return
+     * Returns the max time in milliseconds this solver has to solve a challenge before {@link JobRunnable} kills it (see
+     * {@link JobRunnable#run()}, which only arms this timeout for values &gt; 0). Default: -1 (no solver-specific timeout). <br>
+     * Do not call this directly to decide whether/when to kill a solver -- use {@link #getFinalTimeoutMillis()}, which additionally
+     * applies {@link jd.controlling.captcha.CaptchaSettings#getDefaultMaxSolverChallengePollingTimeoutMillis()} as a global fallback/cap.
      */
-    @Deprecated
-    protected final boolean validateBlackWhite(final Challenge<?> c) {
-        if (!this.isDomainWhitelistEnabled() && !this.isDomainBlacklistEnabled()) {
-            /* Black/Whitelist disabled by user -> No need to check */
-            return true;
-        }
-        final Set<String> hosts = new HashSet<String>();
-        hosts.add(c.getHost());
-        final Plugin plugin = c.getPlugin();
-        final String[] siteSupportedNames = plugin.siteSupportedNames();
-        if (siteSupportedNames != null) {
-            hosts.addAll(Arrays.asList(siteSupportedNames));
-        }
-        if (this.isDomainWhitelistEnabled()) {
-            final List<String> whiteListEntries = getWhitelistedDomains();
-            whiteListHandling: if (whiteListEntries != null && whiteListEntries.size() > 0) {
-                for (final String whiteListEntry : whiteListEntries) {
-                    try {
-                        final Pattern whiteListPattern = Pattern.compile(whiteListEntry, Pattern.CASE_INSENSITIVE);
-                        for (final String host : hosts) {
-                            final Boolean matches = match(c, host, whiteListPattern);
-                            if (Boolean.TRUE.equals(matches)) {
-                                plugin.getLogger().info(c + " is whitelisted for " + this);
-                                return true;
-                            }
-                        }
-                    } catch (Throwable e) {
-                        c.getPlugin().getLogger().log(e);
-                    }
-                }
-            }
-        }
-        if (this.isDomainBlacklistEnabled()) {
-            final List<String> blackListEntries = getBlacklistedDomains();
-            if (blackListEntries != null && blackListEntries.size() > 0) {
-                blackListHandling: for (final String blackListEntry : blackListEntries) {
-                    try {
-                        final Pattern blackListPattern = Pattern.compile(blackListEntry, Pattern.CASE_INSENSITIVE);
-                        for (final String host : hosts) {
-                            final Boolean matches = match(c, host, blackListPattern);
-                            if (Boolean.TRUE.equals(matches)) {
-                                plugin.getLogger().info(c + " is blacklisted for " + this);
-                                return false;
-                            }
-                        }
-                    } catch (Throwable e) {
-                        c.getPlugin().getLogger().log(e);
-                    }
-                }
-            }
-        }
-        return true;
-    }
-
-    @Deprecated
-    private Boolean match(final Challenge<?> c, final String host, final Pattern pattern) {
-        if (!StringUtils.equalsIgnoreCase(host, c.getTypeID())) {
-            if (pattern.matcher(host + "-" + c.getTypeID()).matches()) {
-                return true;
-            }
-            if (pattern.matcher(host).matches()) {
-                return true;
-            }
-        }
-        if (pattern.matcher(c.getTypeID()).matches()) {
-            return true;
-        }
-        return null;
-    }
-
-    public long getTimeout() {
+    public long getTimeoutMillis() {
         return -1;
     }
 
-    public int getWaitForByID(String solverID) {
-        Integer obj = getWaitForMap().get(solverID);
-        return obj == null ? 0 : obj.intValue();
+    /**
+     * Combines this solver's own {@link #getTimeoutMillis()} with the global
+     * {@link jd.controlling.captcha.CaptchaSettings#getDefaultMaxSolverChallengePollingTimeoutMillis()} default: the global default
+     * applies unless the solver itself specifies a lower (positive) value, e.g. a server-side polling timeout. This is what
+     * {@link JobRunnable} actually uses.
+     */
+    public final long getFinalTimeoutMillis() {
+        final long ownTimeoutMillis = getTimeoutMillis();
+        final long defaultMaxMillis = CFG_CAPTCHA.CFG.getDefaultMaxSolverChallengePollingTimeoutMillis();
+        if (ownTimeoutMillis <= 0) {
+            return defaultMaxMillis;
+        }
+        return Math.min(ownTimeoutMillis, defaultMaxMillis);
     }
 
-    private Map<String, Integer> waitForMap = null;
+    /**
+     * Returns the maximum number of captchas this solver (i.e. its {@link SolverService}, summed over all of its accounts, if any) may
+     * work on at the same time. Default: unlimited (no local limit applies to this solver type). See
+     * {@link PluginChallengeSolver#getFinalMaxCaptchaThreads()} for the plugin-based override (the user's own limit). <br>
+     * Not to be confused with {@link #getFinalMaxCaptchaThreadsPerAccount()}, which is a separate limit that applies to every single
+     * account on its own.
+     */
+    public int getFinalMaxCaptchaThreads() {
+        return Integer.MAX_VALUE;
+    }
 
-    public synchronized Map<String, Integer> getWaitForMap() {
-        if (waitForMap != null) {
-            return waitForMap;
-        }
-        Map<String, Integer> map = getService().getConfig().getWaitForMap();
-        if (map == null || map.size() == 0) {
-            map = getService().getWaitForOthersDefaultMap();
-            getService().getConfig().setWaitForMap(map);
-        }
-        waitForMap = Collections.synchronizedMap(map);
-        return waitForMap;
+    /**
+     * Returns the maximum number of captchas this solver may work on at the same time with the one account it is bound to, independent of
+     * how many other accounts the same solver service has. Only meaningful for account based solvers; default: unlimited. See
+     * {@link PluginChallengeSolver#getFinalMaxCaptchaThreadsPerAccount()} for the plugin-based override (the service's server-side limit).
+     * Enforced by {@link ChallengeResponseController#reserveCaptchaSlot(ChallengeSolver)} next to
+     * {@link #getFinalMaxCaptchaThreads()}.
+     */
+    public int getFinalMaxCaptchaThreadsPerAccount() {
+        return Integer.MAX_VALUE;
+    }
+
+    /**
+     * Returns the custom limit rules (max captchas per time interval) that currently apply to this solver, i.e. only the enabled ones, and
+     * only while the solver's custom limits are switched on. Default: null (no custom limits). The returned list is a snapshot and may be
+     * freely iterated. It is evaluated by {@link ChallengeResponseController}: a solver with a used up rule is vetoed for new challenges (see
+     * {@link ChallengeVetoReason#CUSTOM_LIMIT_REACHED}) and every started captcha counts against all rules of the solver. See
+     * {@link PluginChallengeSolver#getCustomLimitRules()} for the plugin-based override.
+     */
+    public List<CaptchaSolverLimitRule> getCustomLimitRules() {
+        return null;
     }
 
     public String toString() {

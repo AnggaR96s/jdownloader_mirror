@@ -5,6 +5,7 @@ import java.util.Set;
 
 import org.appwork.storage.Storable;
 import org.jdownloader.captcha.v2.Challenge.CaptchaRequestType;
+import org.jdownloader.gui.translate._GUI;
 
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 
@@ -16,15 +17,32 @@ public class CaptchaChallengeFilter implements Storable {
 
     private String                  name                = null;
     private String                  domain              = null;
-    private Set<CAPTCHA_TYPE>       captchaTypes        = null;
+    /**
+     * Captcha types excluded from this rule. Empty/null means "no exclusions", i.e. the rule applies to all captcha types, including
+     * ones added in the future - new {@link CAPTCHA_TYPE} constants are active by default instead of requiring existing rules to be
+     * migrated.
+     */
+    private Set<CAPTCHA_TYPE>       excludedCaptchaTypes = null;
     private boolean                 regex               = false;
     private boolean                 enabled             = true;
-    private Set<CaptchaRequestType> captchaRequestTypes = null;
+    /**
+     * Request types excluded from this rule. Empty/null means "no exclusions", i.e. the rule applies to all request types, including
+     * ones added in the future - new {@link CaptchaRequestType} constants are active by default instead of requiring existing rules to
+     * be migrated.
+     */
+    private Set<CaptchaRequestType> excludedCaptchaRequestTypes = null;
     private CaptchaFilterType       filterType          = CaptchaFilterType.BLACKLIST;
     private boolean                 broken              = false;
     private String                  id                  = null;
     private long                    created             = System.currentTimeMillis();
     private int                     position            = 0;
+    /**
+     * Identifier of the captcha solver service this rule applies to (e.g. the solver host "2captcha.com"). An empty/null value means the
+     * rule applies to all solvers.
+     */
+    private String                  solver              = null;
+    /** True for built-in default rules that must not be edited or removed (e.g. the example rule shown in the settings table). */
+    private boolean                 staticRule          = false;
 
     public CaptchaChallengeFilter() {
         // __Storable__ constructor
@@ -70,6 +88,22 @@ public class CaptchaChallengeFilter implements Storable {
         this.position = position;
     }
 
+    public String getSolver() {
+        return solver;
+    }
+
+    public void setSolver(String solver) {
+        this.solver = solver;
+    }
+
+    public boolean isStaticRule() {
+        return staticRule;
+    }
+
+    public void setStaticRule(boolean staticRule) {
+        this.staticRule = staticRule;
+    }
+
     public String getDomain() {
         return domain;
     }
@@ -78,15 +112,15 @@ public class CaptchaChallengeFilter implements Storable {
         this.domain = domain;
     }
 
-    public Set<CAPTCHA_TYPE> getCaptchaTypes() {
-        if (captchaTypes == null) {
-            captchaTypes = new HashSet<CAPTCHA_TYPE>();
+    public Set<CAPTCHA_TYPE> getExcludedCaptchaTypes() {
+        if (excludedCaptchaTypes == null) {
+            excludedCaptchaTypes = new HashSet<CAPTCHA_TYPE>();
         }
-        return captchaTypes;
+        return excludedCaptchaTypes;
     }
 
-    public void setCaptchaTypes(Set<CAPTCHA_TYPE> captchaTypes) {
-        this.captchaTypes = captchaTypes;
+    public void setExcludedCaptchaTypes(Set<CAPTCHA_TYPE> excludedCaptchaTypes) {
+        this.excludedCaptchaTypes = excludedCaptchaTypes;
     }
 
     public boolean isRegex() {
@@ -105,15 +139,15 @@ public class CaptchaChallengeFilter implements Storable {
         this.enabled = enabled;
     }
 
-    public Set<CaptchaRequestType> getCaptchaRequestTypes() {
-        if (captchaRequestTypes == null) {
-            captchaRequestTypes = new HashSet<CaptchaRequestType>();
+    public Set<CaptchaRequestType> getExcludedCaptchaRequestTypes() {
+        if (excludedCaptchaRequestTypes == null) {
+            excludedCaptchaRequestTypes = new HashSet<CaptchaRequestType>();
         }
-        return captchaRequestTypes;
+        return excludedCaptchaRequestTypes;
     }
 
-    public void setCaptchaRequestTypes(Set<CaptchaRequestType> captchaRequestTypes) {
-        this.captchaRequestTypes = captchaRequestTypes;
+    public void setExcludedCaptchaRequestTypes(Set<CaptchaRequestType> excludedCaptchaRequestTypes) {
+        this.excludedCaptchaRequestTypes = excludedCaptchaRequestTypes;
     }
 
     public CaptchaFilterType getFilterType() {
@@ -125,6 +159,20 @@ public class CaptchaChallengeFilter implements Storable {
 
     public void setFilterType(CaptchaFilterType filterType) {
         this.filterType = filterType;
+    }
+
+    /** Returns a copy of this rule (new id, own name suffix), for the "Duplicate" table action. Never called on a static rule. */
+    public CaptchaChallengeFilter duplicate() {
+        final CaptchaChallengeFilter ret = new CaptchaChallengeFilter();
+        ret.setEnabled(isEnabled());
+        ret.setName(_GUI.T.CaptchaRules_duplicate_name(getName()));
+        ret.setDomain(getDomain());
+        ret.setRegex(isRegex());
+        ret.setFilterType(getFilterType());
+        ret.setSolver(getSolver());
+        ret.setExcludedCaptchaTypes(new HashSet<CAPTCHA_TYPE>(getExcludedCaptchaTypes()));
+        ret.setExcludedCaptchaRequestTypes(new HashSet<CaptchaRequestType>(getExcludedCaptchaRequestTypes()));
+        return ret;
     }
 
     /**
@@ -158,11 +206,11 @@ public class CaptchaChallengeFilter implements Storable {
         sb.append(", regex=").append(regex);
         sb.append(", enabled=").append(enabled);
         sb.append(", position=").append(position);
-        if (captchaTypes != null && !captchaTypes.isEmpty()) {
-            sb.append(", captchaTypes=").append(captchaTypes);
+        if (excludedCaptchaTypes != null && !excludedCaptchaTypes.isEmpty()) {
+            sb.append(", excludedCaptchaTypes=").append(excludedCaptchaTypes);
         }
-        if (captchaRequestTypes != null && !captchaRequestTypes.isEmpty()) {
-            sb.append(", requestTypes=").append(captchaRequestTypes);
+        if (excludedCaptchaRequestTypes != null && !excludedCaptchaRequestTypes.isEmpty()) {
+            sb.append(", excludedRequestTypes=").append(excludedCaptchaRequestTypes);
         }
         if (broken) {
             sb.append(", BROKEN");

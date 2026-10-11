@@ -4,11 +4,14 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.appwork.storage.config.JsonConfig;
 import org.appwork.timetracker.TimeTracker;
@@ -17,7 +20,6 @@ import org.appwork.timetracker.TrackerRule;
 import org.appwork.uio.ConfirmDialogInterface;
 import org.appwork.uio.UIOManager;
 import org.appwork.utils.Application;
-import org.appwork.utils.DebugMode;
 import org.appwork.utils.Time;
 import org.appwork.utils.formatter.TimeFormatter;
 import org.appwork.utils.logging2.LogSource;
@@ -30,28 +32,17 @@ import org.jdownloader.captcha.blacklist.CaptchaBlackList;
 import org.jdownloader.captcha.event.ChallengeResponseEvent;
 import org.jdownloader.captcha.event.ChallengeResponseEventSender;
 import org.jdownloader.captcha.v2.ChallengeSolver.ChallengeVetoReason;
+import org.jdownloader.captcha.v2.ChallengeSolver.SolverType;
 import org.jdownloader.captcha.v2.challenge.cloudflareturnstile.CloudflareTurnstileChallenge;
-import org.jdownloader.captcha.v2.challenge.cutcaptcha.CutCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.hcaptcha.HCaptchaChallenge;
 import org.jdownloader.captcha.v2.challenge.oauth.AccountOAuthSolver;
 import org.jdownloader.captcha.v2.challenge.oauth.OAuthDialogSolver;
 import org.jdownloader.captcha.v2.challenge.recaptcha.v2.RecaptchaV2Challenge;
-import org.jdownloader.captcha.v2.solver.CESChallengeSolver;
-import org.jdownloader.captcha.v2.solver.antiCaptchaCom.AntiCaptchaComSolver;
 import org.jdownloader.captcha.v2.solver.browser.AbstractBrowserChallenge;
 import org.jdownloader.captcha.v2.solver.browser.BrowserSolver;
-import org.jdownloader.captcha.v2.solver.cheapcaptcha.CheapCaptchaSolver;
-import org.jdownloader.captcha.v2.solver.dbc.DeathByCaptchaSolver;
-import org.jdownloader.captcha.v2.solver.endcaptcha.EndCaptchaSolver;
 import org.jdownloader.captcha.v2.solver.gui.DialogBasicCaptchaSolver;
-import org.jdownloader.captcha.v2.solver.gui.DialogClickCaptchaSolver;
 import org.jdownloader.captcha.v2.solver.gui.DialogMultiClickCaptchaSolver;
-import org.jdownloader.captcha.v2.solver.imagetyperz.ImageTyperzCaptchaSolver;
 import org.jdownloader.captcha.v2.solver.jac.JACSolver;
-import org.jdownloader.captcha.v2.solver.solver9kw.Captcha9kwSolver;
-import org.jdownloader.captcha.v2.solver.solver9kw.Captcha9kwSolverClick;
-import org.jdownloader.captcha.v2.solver.solver9kw.Captcha9kwSolverMultiClick;
-import org.jdownloader.captcha.v2.solver.twocaptcha.TwoCaptchaSolver;
 import org.jdownloader.captcha.v2.solverjob.ResponseList;
 import org.jdownloader.captcha.v2.solverjob.SolverJob;
 import org.jdownloader.controlling.UniqueAlltimeID;
@@ -65,6 +56,7 @@ import org.jdownloader.plugins.controller.host.HostPluginController;
 import org.jdownloader.plugins.controller.host.LazyHostPlugin;
 import org.jdownloader.plugins.controller.host.LazyHostPluginFilter;
 import org.jdownloader.settings.staticreferences.CFG_CAPTCHA;
+import org.jdownloader.settings.staticreferences.CFG_GENERAL;
 import org.jdownloader.updatev2.UpdateController;
 
 import jd.controlling.AccountController;
@@ -147,18 +139,9 @@ public class ChallengeResponseController {
             return;
         }
         addSolver(JACSolver.getInstance());
-        addSolver(DeathByCaptchaSolver.getInstance());
-        addSolver(ImageTyperzCaptchaSolver.getInstance());
-        addSolver(CheapCaptchaSolver.getInstance());
-        addSolver(TwoCaptchaSolver.getInstance());
-        addSolver(AntiCaptchaComSolver.getInstance());
-        addSolver(EndCaptchaSolver.getInstance());
-        addSolver(Captcha9kwSolver.getInstance());
-        addSolver(Captcha9kwSolverClick.getInstance());
-        addSolver(Captcha9kwSolverMultiClick.getInstance());
+        /* Legacy paid captcha solver engines were removed; they are now provided as captcha solver plugins. */
         if (!Application.isHeadless()) {
             addSolver(DialogBasicCaptchaSolver.getInstance());
-            addSolver(DialogClickCaptchaSolver.getInstance());
             addSolver(DialogMultiClickCaptchaSolver.getInstance());
             addSolver(BrowserSolver.getInstance());
             addSolver(OAuthDialogSolver.getInstance());
@@ -166,20 +149,18 @@ public class ChallengeResponseController {
         addSolver(AccountOAuthSolver.getInstance());
         addSolver(CaptchaAPISolver.getInstance());
         /* Add plugin captcha solver services */
-        if (DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
-            final List<LazyHostPlugin> captchaSolverPlugins = HostPluginController.getInstance().list(new LazyHostPluginFilter().setFeatures(FEATURE.CAPTCHA_SOLVER));
-            for (final LazyHostPlugin plg : captchaSolverPlugins) {
-                final PluginClassLoaderChild pluginClassLoaderChild = PluginClassLoader.getThreadPluginClassLoaderChild();
-                abstractPluginForCaptchaSolver plugin;
-                try {
-                    plugin = Plugin.getNewPluginInstance(null, plg, pluginClassLoaderChild);
-                } catch (PluginException e) {
-                    e.printStackTrace();
-                    continue;
-                }
-                final PluginForCaptchaSolverSolverService solverservice = new PluginForCaptchaSolverSolverService(plugin);
-                addSolverService(solverservice);
+        final List<LazyHostPlugin> captchaSolverPlugins = HostPluginController.getInstance().list(LazyHostPluginFilter.ALL_CAPTCHA_SOLVERS);
+        for (final LazyHostPlugin plg : captchaSolverPlugins) {
+            final PluginClassLoaderChild pluginClassLoaderChild = PluginClassLoader.getThreadPluginClassLoaderChild();
+            abstractPluginForCaptchaSolver plugin;
+            try {
+                plugin = Plugin.getNewPluginInstance(null, plg, pluginClassLoaderChild);
+            } catch (PluginException e) {
+                e.printStackTrace();
+                continue;
             }
+            final PluginForCaptchaSolverSolverService solverservice = new PluginForCaptchaSolverSolverService(plugin);
+            addSolverService(solverservice);
         }
     }
 
@@ -237,9 +218,203 @@ public class ChallengeResponseController {
         eventSender.fireEvent(new ChallengeResponseEvent(this, ChallengeResponseEvent.Type.JOB_DONE, job));
     }
 
-    private final List<ChallengeSolver<?>>               solverList          = new CopyOnWriteArrayList<ChallengeSolver<?>>();
-    private final List<SolverJob<?>>                     activeJobs          = new ArrayList<SolverJob<?>>();
-    private final HashMap<UniqueAlltimeID, SolverJob<?>> challengeIDToJobMap = new HashMap<UniqueAlltimeID, SolverJob<?>>();
+    private final List<ChallengeSolver<?>>                          solverList                       = new CopyOnWriteArrayList<ChallengeSolver<?>>();
+    private final List<SolverJob<?>>                                activeJobs                       = new ArrayList<SolverJob<?>>();
+    private final HashMap<UniqueAlltimeID, SolverJob<?>>            challengeIDToJobMap              = new HashMap<UniqueAlltimeID, SolverJob<?>>();
+    /**
+     * Tracks how many solve attempts are currently in-flight per solver service (key: {@link SolverService#getID()}), i.e. summed over all
+     * accounts of that service. Counted against {@link ChallengeSolver#getFinalMaxCaptchaThreads()}. Used by {@link #createList(Challenge)}
+     * to push a solver that is already at/over a limit to the end of the candidate list instead of excluding it outright, so it still gets
+     * used as a last resort if no solver with free capacity is available, and by {@link #reserveCaptchaSlot(ChallengeSolver)}/
+     * {@link #releaseCaptchaSlot(ChallengeSolver)}, which {@link JobRunnable} uses to actually enforce the limits around a solve attempt.
+     */
+    private final ConcurrentHashMap<String, AtomicInteger>          activeCaptchasByServiceID        = new ConcurrentHashMap<String, AtomicInteger>();
+    /**
+     * Same as {@link #activeCaptchasByServiceID}, but per account (key: {@link Account#getId()}), only for account based solvers. Counted
+     * against {@link ChallengeSolver#getFinalMaxCaptchaThreadsPerAccount()}, which applies to every account on its own.
+     */
+    private final ConcurrentHashMap<UniqueAlltimeID, AtomicInteger> activeCaptchasByAccountID        = new ConcurrentHashMap<UniqueAlltimeID, AtomicInteger>();
+    /**
+     * Guards reserving/releasing slots and is what waiting solvers wait on. A single lock for both counters makes it possible to check and
+     * increment the service and the account counter together atomically.
+     */
+    private final Object                                            CAPTCHA_SLOT_LOCK                = new Object();
+    /**
+     * Start times (ms, ascending) of the captchas recently started per solver service (key: {@link SolverService#getID()}): the basis of
+     * the custom limit rules ({@link ChallengeSolver#getCustomLimitRules()}). Only kept in memory, so a restart of JDownloader resets them,
+     * and only filled for solvers that have enabled custom limit rules. Guarded by {@link #CAPTCHA_SLOT_LOCK}.
+     */
+    private final HashMap<String, ArrayList<Long>>                  captchaStartTimesByServiceID     = new HashMap<String, ArrayList<Long>>();
+    /** Max time to wait for a solver's max-simultaneous-captchas limit to free up before giving up on using that solver for a job. */
+    private static final long                                       CAPTCHA_SLOT_WAIT_TIMEOUT_MILLIS = 60 * 1000L;
+
+    /** Outcome of {@link #reserveCaptchaSlot(ChallengeSolver)}. */
+    public enum CaptchaSlotResult {
+        /** A slot was reserved (and the captcha counted against the custom limits): the caller must release it afterwards. */
+        RESERVED,
+        /** One of the solver's enabled custom limit rules is used up -> the caller must not run this solver. */
+        CUSTOM_LIMIT_REACHED,
+        /** A max-simultaneous-captchas limit was still reached after waiting -> the caller must not run this solver. */
+        NO_FREE_SLOT
+    }
+
+    private static <K> int getActiveCaptchas(final ConcurrentHashMap<K, AtomicInteger> counters, final K key) {
+        final AtomicInteger counter = counters.get(key);
+        return counter == null ? 0 : counter.get();
+    }
+
+    private static <K> AtomicInteger getOrCreateActiveCaptchasCounter(final ConcurrentHashMap<K, AtomicInteger> counters, final K key) {
+        final AtomicInteger existing = counters.get(key);
+        if (existing != null) {
+            return existing;
+        }
+        final AtomicInteger created = new AtomicInteger(0);
+        final AtomicInteger race = counters.putIfAbsent(key, created);
+        return race != null ? race : created;
+    }
+
+    /** Returns the account a solver is bound to (the key of the per-account limit), or null for solvers without an account. */
+    private static UniqueAlltimeID getSlotAccountID(final ChallengeSolver<?> solver) {
+        if (solver instanceof PluginChallengeSolver) {
+            return ((PluginChallengeSolver<?>) solver).getAccount().getId();
+        }
+        return null;
+    }
+
+    /** True if the account the given solver is bound to is already at/over its own per-account limit (not the solver-wide limit). */
+    private boolean isAtAccountLimit(final ChallengeSolver<?> solver) {
+        final UniqueAlltimeID accountID = getSlotAccountID(solver);
+        return accountID != null && getActiveCaptchas(activeCaptchasByAccountID, accountID) >= solver.getFinalMaxCaptchaThreadsPerAccount();
+    }
+
+    /** True if the solver is at/over the solver-wide limit or the limit of its own account. */
+    private boolean isOverCaptchaThreadsLimit(final ChallengeSolver<?> solver) {
+        return getActiveCaptchas(activeCaptchasByServiceID, solver.getService().getID()) >= solver.getFinalMaxCaptchaThreads() || isAtAccountLimit(solver);
+    }
+
+    /**
+     * Returns a description of the first used up rule, or null if every rule still has room for one more captcha. Also forgets the start
+     * times that are older than the longest rule interval. The caller must hold {@link #CAPTCHA_SLOT_LOCK}.
+     */
+    private String getExhaustedCustomLimit(final String serviceID, final List<CaptchaSolverLimitRule> rules, final long now) {
+        final ArrayList<Long> startTimes = captchaStartTimesByServiceID.get(serviceID);
+        if (startTimes == null) {
+            return null;
+        }
+        long longestIntervalMillis = 0;
+        for (final CaptchaSolverLimitRule rule : rules) {
+            longestIntervalMillis = Math.max(longestIntervalMillis, rule._getIntervalMillis());
+        }
+        while (!startTimes.isEmpty() && startTimes.get(0).longValue() < now - longestIntervalMillis) {
+            startTimes.remove(0);
+        }
+        for (final CaptchaSolverLimitRule rule : rules) {
+            final long intervalMillis = rule._getIntervalMillis();
+            int startedInInterval = 0;
+            for (final Long startTime : startTimes) {
+                if (startTime.longValue() >= now - intervalMillis) {
+                    startedInInterval++;
+                }
+            }
+            if (startedInInterval < rule.getMaxCaptchas()) {
+                continue;
+            }
+            /* The rule is usable again as soon as enough of the oldest captchas in the interval have left it. */
+            final long usableAgainAt = startTimes.get(startTimes.size() - rule.getMaxCaptchas()).longValue() + intervalMillis;
+            final String name = rule.getName() != null && rule.getName().length() > 0 ? " \"" + rule.getName() + "\"" : "";
+            return "rule" + name + ": " + startedInInterval + "/" + rule.getMaxCaptchas() + " captchas in the last " + rule.getInterval() + " " + rule.getUnit().name().toLowerCase(Locale.ENGLISH) + ", usable again in " + TimeFormatter.formatMilliSeconds(Math.max(0, usableAgainAt - now), 0);
+        }
+        return null;
+    }
+
+    /**
+     * True if one of the solver's enabled custom limit rules (see {@link ChallengeSolver#getCustomLimitRules()}) is currently used up, so
+     * the solver must not get another captcha. Used to veto the solver for new challenges; logs which rule is used up.
+     */
+    public boolean isCustomLimitReached(final ChallengeSolver<?> solver) {
+        final List<CaptchaSolverLimitRule> rules = solver.getCustomLimitRules();
+        if (rules == null || rules.isEmpty()) {
+            return false;
+        }
+        final String exhausted;
+        synchronized (CAPTCHA_SLOT_LOCK) {
+            exhausted = getExhaustedCustomLimit(solver.getService().getID(), rules, System.currentTimeMillis());
+        }
+        if (exhausted == null) {
+            return false;
+        }
+        logger.info(solver + " is not used because of a custom limit " + exhausted);
+        return true;
+    }
+
+    /**
+     * Reserves a "slot" for the given solver against both its {@link ChallengeSolver#getFinalMaxCaptchaThreads()} limit (all accounts of
+     * the service together) and, for account based solvers, its {@link ChallengeSolver#getFinalMaxCaptchaThreadsPerAccount()} limit (its
+     * own account only). If either limit is currently reached, this waits up to {@link #CAPTCHA_SLOT_WAIT_TIMEOUT_MILLIS} for a slot to
+     * free up. <br>
+     * The solver's enabled custom limit rules ({@link ChallengeSolver#getCustomLimitRules()}) are checked at the same time, atomically with
+     * counting the new captcha, so parallel jobs cannot both slip through the last free place of a rule. A used up rule is not waited for
+     * (it may stay used up for hours); the solver is skipped instead. <br>
+     * Every successful reservation must be paired with a matching {@link #releaseCaptchaSlot(ChallengeSolver)} once the solve attempt
+     * (whether it succeeded, failed, or was skipped) is finished. The captcha stays counted against the custom limits afterwards.
+     */
+    public CaptchaSlotResult reserveCaptchaSlot(final ChallengeSolver<?> solver) throws InterruptedException {
+        final int maxThreads = solver.getFinalMaxCaptchaThreads();
+        final int maxThreadsPerAccount = solver.getFinalMaxCaptchaThreadsPerAccount();
+        final String serviceID = solver.getService().getID();
+        final List<CaptchaSolverLimitRule> limitRules = solver.getCustomLimitRules();
+        final AtomicInteger serviceCounter = getOrCreateActiveCaptchasCounter(activeCaptchasByServiceID, serviceID);
+        final UniqueAlltimeID accountID = getSlotAccountID(solver);
+        final AtomicInteger accountCounter = accountID != null ? getOrCreateActiveCaptchasCounter(activeCaptchasByAccountID, accountID) : null;
+        final long deadline = System.currentTimeMillis() + CAPTCHA_SLOT_WAIT_TIMEOUT_MILLIS;
+        synchronized (CAPTCHA_SLOT_LOCK) {
+            while (true) {
+                if (limitRules != null) {
+                    final String exhausted = getExhaustedCustomLimit(serviceID, limitRules, System.currentTimeMillis());
+                    if (exhausted != null) {
+                        logger.info(solver + " is skipped because of a custom limit " + exhausted);
+                        return CaptchaSlotResult.CUSTOM_LIMIT_REACHED;
+                    }
+                }
+                if (serviceCounter.get() < maxThreads && (accountCounter == null || accountCounter.get() < maxThreadsPerAccount)) {
+                    serviceCounter.incrementAndGet();
+                    if (accountCounter != null) {
+                        accountCounter.incrementAndGet();
+                    }
+                    if (limitRules != null) {
+                        ArrayList<Long> startTimes = captchaStartTimesByServiceID.get(serviceID);
+                        if (startTimes == null) {
+                            startTimes = new ArrayList<Long>();
+                            captchaStartTimesByServiceID.put(serviceID, startTimes);
+                        }
+                        startTimes.add(Long.valueOf(System.currentTimeMillis()));
+                    }
+                    return CaptchaSlotResult.RESERVED;
+                }
+                final long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    return CaptchaSlotResult.NO_FREE_SLOT;
+                }
+                CAPTCHA_SLOT_LOCK.wait(remaining);
+            }
+        }
+    }
+
+    /** Releases a slot previously reserved via {@link #reserveCaptchaSlot(ChallengeSolver)} for the given solver. */
+    public void releaseCaptchaSlot(final ChallengeSolver<?> solver) {
+        final AtomicInteger serviceCounter = activeCaptchasByServiceID.get(solver.getService().getID());
+        final UniqueAlltimeID accountID = getSlotAccountID(solver);
+        final AtomicInteger accountCounter = accountID != null ? activeCaptchasByAccountID.get(accountID) : null;
+        synchronized (CAPTCHA_SLOT_LOCK) {
+            if (serviceCounter != null) {
+                serviceCounter.decrementAndGet();
+            }
+            if (accountCounter != null) {
+                accountCounter.decrementAndGet();
+            }
+            CAPTCHA_SLOT_LOCK.notifyAll();
+        }
+    }
 
     /**
      * When one job gets a skiprequest, we have to check all pending jobs if this skiprequest affects them as well. if so, we have to skip
@@ -286,11 +461,9 @@ public class ChallengeResponseController {
         logger.info("Handle Challenge: " + c);
         final List<ChallengeSolver<T>> solvers = createList(c);
         logger.info("Solver: " + solvers);
-        if (solvers.size() == 0) {
+        if (solvers == null || solvers.size() == 0) {
             logger.info("No solver available!");
-            if (c instanceof CloudflareTurnstileChallenge) {
-                showNoBrowserSolverInfoDialog(c);
-            } else if (c instanceof CutCaptchaChallenge) {
+            if (isExternalSolverRequired(c)) {
                 showNoBrowserSolverInfoDialog(c);
             }
             /* See: https://support.jdownloader.org/knowledgebase/article/error-skipped-captcha-is-required */
@@ -360,6 +533,31 @@ public class ChallengeResponseController {
                 fireJobDone(job);
             }
             c.onHandled();
+        }
+    }
+
+    /**
+     * True if the given interactive (browser based) challenge cannot be solved by the local {@link BrowserSolver} because it is not
+     * supported by it, which means that the user can only solve it with an external captcha solver. Reasons caused by the user's own
+     * settings (solver/captcha type disabled, blacklisted by captcha rules) do not count.
+     */
+    private boolean isExternalSolverRequired(final Challenge<?> c) {
+        if (!(c instanceof AbstractBrowserChallenge)) {
+            /* Not an interactive captcha (e.g. image captcha) -> No BrowserSolver required */
+            return false;
+        }
+        final ChallengeVetoReason reason = BrowserSolver.getInstance().getChallengeVetoReason(c);
+        if (reason == null) {
+            /* No veto reason -> BrowserSolver would be able to handle that challenge */
+            return false;
+        }
+        switch (reason) {
+        case UNSUPPORTED_BY_SOLVER:
+        case UNSUPPORTED_FOR_INTERNAL_SPECIAL_REASONS:
+        case UNSUPPORTED_BROWSER_NO_URL_OPEN:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -459,6 +657,7 @@ public class ChallengeResponseController {
     private <T> List<ChallengeSolver<T>> createList(final Challenge<T> c) {
         final List<ChallengeSolver<T>> ret = new ArrayList<ChallengeSolver<T>>();
         final HashSet<ChallengeVetoReason> vetoReasons = new HashSet<ChallengeVetoReason>();
+        /* Process our own default/local solvers */
         for (final ChallengeSolver<?> solver : solverList) {
             try {
                 final ChallengeVetoReason veto = solver.getChallengeVetoReason(c);
@@ -471,87 +670,149 @@ public class ChallengeResponseController {
                 logger.log(e);
             }
         }
-        final AccountFilter af = new AccountFilter().setFeature(FEATURE.CAPTCHA_SOLVER);
-        final List<Account> solverAccounts = AccountController.getInstance().listAccounts(af);
-        /* Map to collect solver accounts by domain */
-        final Map<String, Account> bestAccountsByDomain = new HashMap<String, Account>();
-        /* Collect unavailable solver domains for logging purposes only */
-        final HashSet<String> unavailableSolverDomains = new HashSet<String>();
-        for (final Account solverAccount : solverAccounts) {
-            if (solverAccount.getAccountInfo() == null) {
-                /* Skip accounts without AccountInfo. */
-                continue;
+        add_solver_accounts: {
+            if (!CFG_GENERAL.CFG.isUseAvailableCaptchaSolverAccounts()) {
+                /* User has globally disabled usage of solver accounts -> Don't even fetch accounts */
+                logger.info("User has globally disabled usage of solver accounts");
+                vetoReasons.add(ChallengeVetoReason.EXTERNAL_SOLVER_ACCOUNTS_DISABLED);
+                break add_solver_accounts;
             }
-            boolean success = false;
-            try {
-                final abstractPluginForCaptchaSolver plugin = (abstractPluginForCaptchaSolver) solverAccount.getPlugin();
-                final ChallengeSolver<T> solver = plugin.getPluginChallengeSolver(c, solverAccount);
-                if (solver == null) {
-                    /* E.g. solver cannot handle challenge it gets presented */
+            final AccountFilter af = new AccountFilter().setFeature(FEATURE.CAPTCHA_SOLVER);
+            /* Map to collect solver accounts by domain */
+            final Map<String, Account> bestAccountsByDomain = new HashMap<String, Account>();
+            /* Whether the account stored in bestAccountsByDomain is already at its own per-account captcha limit (same keys). */
+            final Map<String, Boolean> bestAccountAtLimitByDomain = new HashMap<String, Boolean>();
+            /* Collect unavailable solver domains and their veto reasons for logging purposes only */
+            final HashSet<String> unavailableSolverDomains = new HashSet<String>();
+            final Map<String, ChallengeVetoReason> unavailableSolverDomainVetoReasons = new HashMap<String, ChallengeVetoReason>();
+            final List<Account> solverAccounts = AccountController.getInstance().listAccounts(af);
+            for (final Account solverAccount : solverAccounts) {
+                if (solverAccount.getAccountInfo() == null) {
+                    /* Skip accounts without AccountInfo. */
                     continue;
                 }
-                final SolverService service = solver.getService();
-                if (!service.isEnabled()) {
-                    // TODO: Move this into getChallengeVetoReason
-                    vetoReasons.add(ChallengeVetoReason.SOLVER_DISABLED);
-                    continue;
+                boolean success = false;
+                try {
+                    final abstractPluginForCaptchaSolver plugin = (abstractPluginForCaptchaSolver) solverAccount.getPlugin();
+                    final ChallengeSolver<T> solver = plugin.getPluginChallengeSolver(c, solverAccount);
+                    if (solver == null) {
+                        /* E.g. solver cannot handle challenge it gets presented */
+                        continue;
+                    }
+                    final SolverService service = solver.getService();
+                    if (!service.getConfigV3().isEnabled()) {
+                        // TODO: Move this into getChallengeVetoReason
+                        vetoReasons.add(ChallengeVetoReason.SOLVER_DISABLED);
+                        unavailableSolverDomainVetoReasons.put(solverAccount.getHoster(), ChallengeVetoReason.SOLVER_DISABLED);
+                        continue;
+                    }
+                    final ChallengeVetoReason veto = solver.getChallengeVetoReason(c);
+                    if (veto != null) {
+                        vetoReasons.add(veto);
+                        unavailableSolverDomainVetoReasons.put(solverAccount.getHoster(), veto);
+                        continue;
+                    }
+                    /*
+                     * Collect account by domain, keeping only ONE: preferably the one with lowest balance, but an account that is already
+                     * at its own per-account captcha limit loses against one that still has free capacity. If every account of the domain
+                     * is at its limit, the one with the lowest balance is kept anyway (it then waits for a free slot, see
+                     * reserveCaptchaSlot). Only the per-account limit counts here; the user's solver-wide limit is the same for all
+                     * accounts of the domain, so switching the account would not help.
+                     */
+                    final String domain = solverAccount.getHoster();
+                    final double currentBalance = solverAccount.getAccountInfo().getAccountBalance();
+                    final boolean atAccountLimit = isAtAccountLimit(solver);
+                    final Account existingAccount = bestAccountsByDomain.get(domain);
+                    final boolean existingAtAccountLimit = existingAccount != null && Boolean.TRUE.equals(bestAccountAtLimitByDomain.get(domain));
+                    final boolean betterThanExisting;
+                    if (existingAccount == null) {
+                        betterThanExisting = true;
+                    } else if (atAccountLimit != existingAtAccountLimit) {
+                        /* Exactly one of the two is at its limit: the one with free capacity wins regardless of the balance. */
+                        betterThanExisting = existingAtAccountLimit;
+                    } else {
+                        betterThanExisting = currentBalance < existingAccount.getAccountInfo().getAccountBalance();
+                    }
+                    if (betterThanExisting) {
+                        bestAccountsByDomain.put(domain, solverAccount);
+                        bestAccountAtLimitByDomain.put(domain, Boolean.valueOf(atAccountLimit));
+                    }
+                    success = true;
+                } catch (final Throwable e) {
+                    logger.log(e);
+                    logger.warning("Exception happened during collecting fitting solver plugins");
+                } finally {
+                    if (success) {
+                        unavailableSolverDomains.remove(solverAccount.getHoster());
+                        unavailableSolverDomainVetoReasons.remove(solverAccount.getHoster());
+                    } else {
+                        unavailableSolverDomains.add(solverAccount.getHoster());
+                    }
                 }
-                final ChallengeVetoReason veto = solver.getChallengeVetoReason(c);
-                if (veto != null) {
-                    vetoReasons.add(veto);
-                    continue;
+            }
+            /* Add solvers from best accounts to ret list -> Only one account per solver, only the account with the lowest balance. */
+            for (final Account bestAccount : bestAccountsByDomain.values()) {
+                try {
+                    final abstractPluginForCaptchaSolver plugin = (abstractPluginForCaptchaSolver) bestAccount.getPlugin();
+                    final ChallengeSolver<T> solver = plugin.getPluginChallengeSolver(c, bestAccount);
+                    if (solver != null) {
+                        ret.add(solver);
+                    }
+                } catch (final Throwable e) {
+                    logger.log(e);
                 }
-                /* Collect account by domain, keeping only the one with lowest balance */
-                final String domain = solverAccount.getHoster();
-                final double currentBalance = solverAccount.getAccountInfo().getAccountBalance();
-                final Account existingAccount = bestAccountsByDomain.get(domain);
-                if (existingAccount == null || currentBalance < existingAccount.getAccountInfo().getAccountBalance()) {
-                    bestAccountsByDomain.put(domain, solverAccount);
-                }
-                success = true;
-            } catch (final Throwable e) {
-                logger.log(e);
-                logger.warning("Exception happened during collecting fitting solver plugins");
-            } finally {
-                if (success) {
-                    unavailableSolverDomains.remove(solverAccount.getHoster());
-                } else {
-                    unavailableSolverDomains.add(solverAccount.getHoster());
-                }
+            }
+            if (unavailableSolverDomains.size() > 0) {
+                logger.info("Existing solver accounts that cannot be used for this challenge: " + unavailableSolverDomains + "|vetoReasons=" + unavailableSolverDomainVetoReasons);
             }
         }
-        /* Add solvers from best accounts to ret list -> Onkly one account per solver, only the account with the lowest balance. */
-        for (final Account bestAccount : bestAccountsByDomain.values()) {
-            try {
-                final abstractPluginForCaptchaSolver plugin = (abstractPluginForCaptchaSolver) bestAccount.getPlugin();
-                final ChallengeSolver<T> solver = plugin.getPluginChallengeSolver(c, bestAccount);
-                if (solver != null) {
-                    ret.add(solver);
-                }
-            } catch (final Throwable e) {
-                logger.log(e);
-            }
-        }
-        logger.info("Existing solver accounts that cannot be used for this challenge: " + unavailableSolverDomains);
+        int avoidedAutoSolversForLoginCaptcha = 0;
         avoidAutoSolver: if (c.isAccountLogin() && CAPTCHA_SETTINGS.isAvoidAutoSolverForLoginCaptchas()) {
             /*
              * Special handling for login captchas: Solve them locally if possible and wished in order to solve them faster since account
              * logins in JDownloader are supposed to happen fast.
              */
             final List<ChallengeSolver<T>> manualSolvers = new ArrayList<ChallengeSolver<T>>();
+            int numberofExternalSolvers = 0;
             for (final ChallengeSolver<T> solver : ret) {
-                if (solver instanceof CESChallengeSolver) {
+                if (solver.getSolverType() == SolverType.EXTERNAL) {
+                    numberofExternalSolvers++;
                     continue;
                 }
                 manualSolvers.add(solver);
             }
             if (manualSolvers.size() == 0) {
+                logger.info("Tried to avoid auto solvers for login challenge -> Impossible because there are no manual solvers available!");
                 break avoidAutoSolver;
             }
             /* Clear all external solvers and only allow local solvers. */
+            avoidedAutoSolversForLoginCaptcha = numberofExternalSolvers;
             ret.clear();
             ret.addAll(manualSolvers);
         }
+        reSortByOverThreadsLimit: {
+            /*
+             * Soft-limit handling for ChallengeSolver#getFinalMaxCaptchaThreads() and #getFinalMaxCaptchaThreadsPerAccount(): a solver
+             * already at/over one of its max-simultaneous-captchas limits is not removed from the list, just moved to the end, so it is
+             * only used if no solver with free capacity is available.
+             */
+            final List<ChallengeSolver<T>> withinCaptchaThreadsLimit = new ArrayList<ChallengeSolver<T>>(ret.size());
+            final List<ChallengeSolver<T>> overCaptchaThreadsLimit = new ArrayList<ChallengeSolver<T>>();
+            for (final ChallengeSolver<T> solver : ret) {
+                if (isOverCaptchaThreadsLimit(solver)) {
+                    overCaptchaThreadsLimit.add(solver);
+                } else {
+                    withinCaptchaThreadsLimit.add(solver);
+                }
+            }
+            if (overCaptchaThreadsLimit.size() > 0) {
+                logger.info("Solvers currently over their max-simultaneous-captchas limit for challenge " + c.getId() + ": " + overCaptchaThreadsLimit);
+                ret.clear();
+                ret.addAll(withinCaptchaThreadsLimit);
+                ret.addAll(overCaptchaThreadsLimit);
+            }
+        }
+        logger.info("Eligible solvers for challenge " + c.getId() + ": " + ret + "|avoidedAutoSolversForLoginCaptcha=" + avoidedAutoSolversForLoginCaptcha);
         return ret;
     }
 
@@ -578,7 +839,8 @@ public class ChallengeResponseController {
         final HashSet<Object> dupe = new HashSet<Object>();
         for (final ChallengeSolver<?> s : solverList) {
             if (dupe.add(s.getService())) {
-                s.getService().getConfig().setWaitForMap(null);
+                /* Removes the user's wait times, so the defaults apply again. */
+                JobRunnable.resetWaitFor(s.getService());
             }
         }
     }

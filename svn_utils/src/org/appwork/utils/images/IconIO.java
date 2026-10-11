@@ -104,7 +104,7 @@ public class IconIO {
     public static class ScaledIcon extends AbstractIconPipe implements Icon, IDIcon {
         private final int                          width;
         private final int                          height;
-        private final Interpolation                interpolation;
+        private Interpolation                      interpolation = org.appwork.utils.images.Interpolation.BICUBIC;
         private final double                       faktor;
         private static final Set<ModificationType> MODIFICATIONS = Collections.unmodifiableSet(new HashSet<ModificationType>(Arrays.asList(ModificationType.SIZE)));
 
@@ -127,12 +127,12 @@ public class IconIO {
             this.faktor = 1d / Math.max((double) icon.getIconWidth() / width, (double) icon.getIconHeight() / height);
             this.width = Math.max((int) Math.round(icon.getIconWidth() * this.faktor), 1);
             this.height = Math.max((int) Math.round(icon.getIconHeight() * this.faktor), 1);
-            this.interpolation = interpolation;
+            this.interpolation = interpolation == null ? org.appwork.utils.images.Interpolation.BICUBIC : interpolation;
         }
 
         /*
          * (non-Javadoc)
-         *
+         * 
          * @see javax.swing.Icon#getIconHeight()
          */
         @Override
@@ -142,7 +142,7 @@ public class IconIO {
 
         /*
          * (non-Javadoc)
-         *
+         * 
          * @see javax.swing.Icon#getIconWidth()
          */
         @Override
@@ -152,7 +152,7 @@ public class IconIO {
 
         /*
          * (non-Javadoc)
-         *
+         * 
          * @see org.appwork.swing.components.IdentifierInterface#toIdentifier()
          */
         @Override
@@ -174,7 +174,7 @@ public class IconIO {
 
         /*
          * (non-Javadoc)
-         *
+         * 
          * @see javax.swing.Icon#paintIcon(java.awt.Component, java.awt.Graphics, int, int)
          */
         @Override
@@ -418,6 +418,7 @@ public class IconIO {
                         return factory;
                     }
                 } catch (Throwable e) {
+                    org.appwork.loggingv3.LogV3.log(e);
                     if (DebugMode.TRUE_IN_IDE_ELSE_FALSE) {
                         throw new WTFException(e);
                     }
@@ -434,12 +435,14 @@ public class IconIO {
      * @return
      */
     public static Icon getIcon(final URL resource, final int w, int h) {
-        Icon ret = loadVectorIcon(resource, w, h);
+        final Icon ret = loadVectorIcon(resource, w, h);
         if (ret != null) {
             return ret;
         }
-        Image image = loadImage(resource);
-        if (image.getWidth(null) == w && image.getHeight(null) == h) {
+        final Image image = loadImage(resource);
+        if (image == null) {
+            return null;
+        } else if (image.getWidth(null) == w && image.getHeight(null) == h) {
             return new ImageIcon(image);
         } else if (w <= 0 && h <= 0) {
             return new ImageIcon(image);
@@ -545,19 +548,20 @@ public class IconIO {
      */
     public static Icon loadVectorIcon(final URL resource, final int w, int h) {
         if (resource != null && StringUtils.endsWithCaseInsensitive(resource.getPath(), ".svg")) {
-            if (getSvgFactory() != null) {
-                try {
-                    final InputStream is = resource.openStream();
-                    try {
-                        return getSvgFactory().getIconFromSVG(is, null, w, h, null);
-                    } finally {
-                        is.close();
-                    }
-                } catch (IOException e) {
-                    LogV3.log(e);
-                }
-            } else {
+            final SVGFactory svgFactory = getSvgFactory();
+            if (svgFactory == null) {
                 LogV3.warning("SVG Factory not found!");
+                return null;
+            }
+            try {
+                final InputStream is = resource.openStream();
+                try {
+                    return svgFactory.getIconFromSVG(is, null, w, h, null);
+                } finally {
+                    is.close();
+                }
+            } catch (IOException e) {
+                LogV3.log(e);
             }
         }
         return null;

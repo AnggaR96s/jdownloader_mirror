@@ -15,12 +15,11 @@
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package jd.plugins.hoster;
 
-import org.appwork.utils.formatter.SizeFormatter;
-import org.jdownloader.captcha.v2.challenge.recaptcha.v2.CaptchaHelperHostPluginRecaptchaV2;
-import org.jdownloader.plugins.components.antiDDoSForHost;
+import java.util.concurrent.TimeUnit;
 
 import jd.PluginWrapper;
 import jd.http.Browser;
+import jd.http.URLConnectionAdapter;
 import jd.nutils.encoding.Encoding;
 import jd.parser.Regex;
 import jd.parser.html.Form;
@@ -30,7 +29,11 @@ import jd.plugins.HostPlugin;
 import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 
-@HostPlugin(revision = "$Revision: 48018 $", interfaceVersion = 2, names = { "uploader.jp" }, urls = { "https?://u[a-z0-9]\\.getuploader\\.com/([a-z0-9\\-_]+)/download/(\\d+)" })
+import org.appwork.utils.formatter.SizeFormatter;
+import org.jdownloader.captcha.v2.challenge.recaptcha.v2.CaptchaHelperHostPluginRecaptchaV2;
+import org.jdownloader.plugins.components.antiDDoSForHost;
+
+@HostPlugin(revision = "$Revision: 53556 $", interfaceVersion = 2, names = { "uploader.jp" }, urls = { "https?://u[a-z0-9]\\.getuploader\\.com/([a-z0-9\\-_]+)/download/(\\d+)" })
 public class UploaderJp extends antiDDoSForHost {
     public UploaderJp(PluginWrapper wrapper) {
         super(wrapper);
@@ -96,6 +99,15 @@ public class UploaderJp extends antiDDoSForHost {
     }
 
     @Override
+    protected boolean looksLikeDownloadableContent(URLConnectionAdapter urlConnection) {
+        if (urlConnection.getResponseCode() == 200 && urlConnection.getCompleteContentLength() == 0 && getDownloadLink().getKnownDownloadSize() == 0) {
+            // allow zero/0 byte length file downloads
+            return true;
+        }
+        return super.looksLikeDownloadableContent(urlConnection);
+    }
+
+    @Override
     public void handleFree(final DownloadLink link) throws Exception, PluginException {
         requestFileInformation(link);
         Form form = getContinueForm(br);
@@ -138,6 +150,7 @@ public class UploaderJp extends antiDDoSForHost {
             throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
         }
         dllink = Encoding.htmlDecode(dllink);
+        sleep(TimeUnit.SECONDS.toMillis(6), link);
         dl = jd.plugins.BrowserAdapter.openDownload(br, link, dllink, false, 1);
         if (!looksLikeDownloadableContent(dl.getConnection())) {
             br.followConnection(true);

@@ -44,7 +44,7 @@ import jd.plugins.PluginException;
 import jd.plugins.PluginForDecrypt;
 import jd.plugins.components.PluginJSonUtils;
 
-@DecrypterPlugin(revision = "$Revision: 53094 $", interfaceVersion = 2, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 53447 $", interfaceVersion = 2, names = {}, urls = {})
 public class BsTo extends PluginForDecrypt {
     public BsTo(PluginWrapper wrapper) {
         super(wrapper);
@@ -55,14 +55,12 @@ public class BsTo extends PluginForDecrypt {
         final List<String[]> ret = new ArrayList<String[]>();
         // each entry in List<String[]> will result in one PluginForDecrypt, Plugin.getHost() will return String[0]->main domain
         /* Full list of their current domains see: https://burningseries.domains/ */
-        ret.add(new String[] { "burningseries.ac", "bs.to", "burningseries.co", "burningseries.sx", "burningseries.vc", "burningseries.cx", "burningseries.nz", "burningseries.se", "burning-series.io", "burningseries.tw", "bs.cine.to" });
+        ret.add(new String[] { "burningseries.ac", "bs.to", "burningseries.co", "burningseries.sx", "burningseries.vc", "burningseries.cx", "burningseries.nz", "burningseries.se", "burning-series.io", "burningseries.tw", "bs.cine.to", "burning-series.fun", "bs-to.fun" });
         return ret;
     }
 
     private static final List<String> getDeadDomains() {
         final ArrayList<String> deadDomains = new ArrayList<String>();
-        /* 2023-10-10: Strange advertisement copy-website(?) */
-        deadDomains.add("burning-series.io");
         /* 2023-10-10: Down */
         deadDomains.add("burningseries.cx");
         deadDomains.add("burningseries.nz");
@@ -71,6 +69,12 @@ public class BsTo extends PluginForDecrypt {
         /* 2027-07-08 */
         deadDomains.add("burningseries.co");
         deadDomains.add("bs.to");
+        /* 2026-09-17 */
+        deadDomains.add("burningseries.vc");
+        /* 2026-09-17: Fake/Scam domains */
+        deadDomains.add("burning-series.fun");
+        deadDomains.add("burning-series.io");
+        deadDomains.add("bs-to.fun");
         return deadDomains;
     }
 
@@ -101,10 +105,8 @@ public class BsTo extends PluginForDecrypt {
         final ArrayList<DownloadLink> ret = new ArrayList<DownloadLink>();
         String contenturl = param.getCryptedUrl();
         final String addedLinkDomain = Browser.getHost(contenturl, true);
-        String domainToUse = addedLinkDomain;
         if (getDeadDomains().contains(addedLinkDomain)) {
-            domainToUse = this.getHost();
-            contenturl = contenturl.replaceFirst(Pattern.quote(addedLinkDomain), domainToUse);
+            contenturl = contenturl.replaceFirst(Pattern.quote(addedLinkDomain), this.getHost());
         }
         if (contenturl.matches("(?i)https?://[^/]+/out.*")) {
             /* 2022-02-01: Old single link(?) */

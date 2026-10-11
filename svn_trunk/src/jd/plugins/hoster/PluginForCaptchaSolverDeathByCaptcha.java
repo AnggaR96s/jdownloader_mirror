@@ -58,6 +58,7 @@ import jd.http.requests.PostFormDataRequest;
 import jd.plugins.Account;
 import jd.plugins.AccountInfo;
 import jd.plugins.AccountInvalidException;
+import jd.plugins.AccountUnavailableException;
 import jd.plugins.CaptchaType.CAPTCHA_TYPE;
 import jd.plugins.DefaultEditAccountPanelAPIKeyLogin;
 import jd.plugins.HostPlugin;
@@ -65,7 +66,7 @@ import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 import net.miginfocom.swing.MigLayout;
 
-@HostPlugin(revision = "$Revision: 53033 $", interfaceVersion = 3, names = { "deathbycaptcha.com" }, urls = { "" })
+@HostPlugin(revision = "$Revision: 53549 $", interfaceVersion = 3, names = { "deathbycaptcha.com" }, urls = { "" })
 public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptchaSolver {
     @Override
     public LazyPlugin.FEATURE[] getFeatures() {
@@ -85,7 +86,12 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
         final Browser br = super.createNewBrowserInstance();
         br.getHeaders().put("Accept", "application/json");
         br.getHeaders().put("User-Agent", "JDownloader");
-        br.setAllowedResponseCodes(200, 400);
+        /*
+         * Per https://deathbycaptcha.com/api#api_details: 403 = credentials rejected OR insufficient credits, 400 = malformed
+         * request/invalid captcha, 500 = internal error, 503 = service overloaded. All of these still return a normal JSON body (status +
+         * error fields), so they must be allowed here and classified by HTTP code in callAPI(), not treated as a transport error.
+         */
+        br.setAllowedResponseCodes(200, 400, 403, 500, 503);
         br.setFollowRedirects(true);
         return br;
     }
@@ -111,10 +117,15 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
         types.add(CAPTCHA_TYPE.CUTCAPTCHA);
         /* 2025-02-24: Not supported anymore, see isChallengeSupported and: https://deathbycaptcha.com/api#supported_captchas */
         // types.add(CAPTCHA_TYPE.HCAPTCHA);
-        types.add(CAPTCHA_TYPE.MT_CAPTCHA);
-        types.add(CAPTCHA_TYPE.GEETEST_V1);
-        types.add(CAPTCHA_TYPE.GEETEST_V4);
-        types.add(CAPTCHA_TYPE.FRIENDLY_CAPTCHA);
+        /*
+         * 2026-09-18: The service supports these too, but solve() has no request handling for them yet, so they are NOT declared here.
+         * Declaring them without a matching solve() branch would make solve() throw for such a challenge. Re-add together with the
+         * corresponding solve() handling.
+         */
+        // types.add(CAPTCHA_TYPE.MT_CAPTCHA);
+        // types.add(CAPTCHA_TYPE.GEETEST_V1);
+        // types.add(CAPTCHA_TYPE.GEETEST_V4);
+        // types.add(CAPTCHA_TYPE.FRIENDLY_CAPTCHA);
         return types;
     }
 
@@ -148,25 +159,16 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
     public AccountInfo fetchAccountInfo(Account account) throws Exception {
         final String username = account.getUser();
         final String password = account.getPass();
-        final Number loginTypeProperty = (Number) account.getProperty(PROPERTY_ACCOUNT_LOGIN_TYPE);
-        final int loginType = loginTypeProperty != null ? loginTypeProperty.intValue() : -1;
+        /*
+         * Determine which login type(s) to try. Each login type is tried at most once. If a login type has already been established for
+         * this account, only that one is used; otherwise every applicable type is tried once (token first if the password looks like a
+         * token).
+         */
+        final List<Integer> loginTypesToTry = getLoginTypesToTry(account, password);
         Map<String, Object> entries = null;
-        int[] loginTypesToTry = new int[2];
-        int tryCount = 0;
-        if (loginType == -1) {
-            /* Login type hasn't been set before -> Try user:pw and also token login but only if password looks like valid token. */
-            if (this.looksLikeValidAPIKey(password)) {
-                loginTypesToTry[tryCount++] = ACCOUNT_LOGIN_TYPE_AUTHTOKEN;
-            }
-            loginTypesToTry[tryCount++] = ACCOUNT_LOGIN_TYPE_USER_AND_PASSWORD;
-        } else if (loginType == ACCOUNT_LOGIN_TYPE_AUTHTOKEN) {
-            loginTypesToTry[tryCount++] = ACCOUNT_LOGIN_TYPE_AUTHTOKEN;
-        } else {
-            loginTypesToTry[tryCount++] = ACCOUNT_LOGIN_TYPE_USER_AND_PASSWORD;
-        }
-        for (int i = 0; i < tryCount; i++) {
-            final boolean isLastTry = i >= tryCount;
-            final int currentLoginType = loginTypesToTry[i];
+        for (int i = 0; i < loginTypesToTry.size(); i++) {
+            final boolean isLastTry = i == loginTypesToTry.size() - 1;
+            final int currentLoginType = loginTypesToTry.get(i).intValue();
             final UrlQuery query = new UrlQuery(true);
             if (currentLoginType == ACCOUNT_LOGIN_TYPE_AUTHTOKEN) {
                 query.append("authtoken", password, true);
@@ -180,9 +182,10 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
                 account.setProperty(PROPERTY_ACCOUNT_LOGIN_TYPE, currentLoginType);
                 break;
             } catch (final PluginException pe) {
-                if (loginType != -1 || isLastTry) {
+                if (isLastTry) {
                     throw pe;
                 }
+                /* Not the last candidate -> try the next login type. */
             }
         }
         final Double creditsInDollarCent = ((Number) entries.get("balance")).doubleValue();
@@ -193,18 +196,16 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
             /* Set unique username for accounts which were added via token login */
             account.setUser(entries.get("user").toString());
         }
-        ai.setStatus("Balance: " + ai.getAccountBalanceFormatted() + " | Rate: " + entries.get("rate"));
+        /* The balance part is translated, the rate is specific to this service and stays untranslated. */
+        ai.setStatus(_GUI.T.CaptchaSolverAccount_balance(ai.getAccountBalanceFormatted()) + " | Rate: " + entries.get("rate"));
         return ai;
     }
 
     @Override
     public void solve(CESSolverJob<?> job, Account account) throws Exception {
         final Challenge<?> challenge = job.getChallenge();
-        // TODO
-        // job.showBubble(this);
+        challenge.sendStatsSolving(job.getSolver());
         try {
-            // TODO
-            // challenge.sendStatsSolving(this);
             job.setStatus(SolverStatus.UPLOADING);
             final PostFormDataRequest r = new PostFormDataRequest(getApiBase() + "/captcha");
             final String username = account.getUser();
@@ -296,39 +297,37 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
                 throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Failed to upload captcha");
             }
             job.setStatus(SolverStatus.SOLVING);
-            long startTime = System.currentTimeMillis();
-            Map<String, Object> pollresp = null;
+            String solution = null;
             while (true) {
-                this.sleep(this.getPollingIntervalMillis(account), null);
+                waitDuringPolling(job.getChallenge(), account);
                 br.getPage(getApiBase() + "/captcha/" + captchaID);
-                pollresp = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
-                final int status = ((Number) pollresp.get("status")).intValue();
-                final boolean is_correct = ((Boolean) pollresp.get("is_correct")).booleanValue();
-                if (is_correct) {
+                final Map<String, Object> pollresp = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
+                /*
+                 * DeathByCaptcha reports is_correct=1 both while the captcha is still being processed AND when it was solved correctly; it
+                 * only turns 0 for an incorrect solution. Completion is therefore detected by a non-empty "text" (the answer). While the
+                 * captcha is still being solved, "text" is empty; "?" signals an incorrect solution.
+                 */
+                if (!isApiTrue(pollresp.get("is_correct"))) {
+                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solution incorrect");
+                }
+                final String text = (String) pollresp.get("text");
+                if (text != null && text.length() > 0 && !text.equals("?")) {
+                    solution = text;
                     break;
                 }
-                if (status == 255) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solution incorrect");
-                } else if (status != 0) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solve error: status " + status);
-                } else if (System.currentTimeMillis() - startTime > 60 * 60 * 1000) {
-                    throw new PluginException(LinkStatus.ERROR_CAPTCHA, "Captcha solve timeout");
-                }
             }
-            final String solution = (String) pollresp.get("text");
             job.getLogger().info("CAPTCHA(" + type + ") solved: " + solution);
             AbstractResponse resp = null;
             if (challenge instanceof RecaptchaV2Challenge || challenge instanceof HCaptchaChallenge || challenge instanceof CloudflareTurnstileChallenge || challenge instanceof CutCaptchaChallenge) {
-                resp = new TokenCaptchaResponse((Challenge<String>) challenge, this, solution);
+                resp = new TokenCaptchaResponse((Challenge<String>) challenge, job.getSolver(), solution);
             } else {
-                resp = new CaptchaResponse((Challenge<String>) challenge, this, solution);
+                resp = new CaptchaResponse((Challenge<String>) challenge, job.getSolver(), solution);
             }
             resp.setCaptchaSolverTaskID(Integer.toString(captchaID));
             job.setAnswer(resp);
             return;
         } catch (Exception e) {
-            // TODO
-            // challenge.sendStatsError(this, e);
+            challenge.sendStatsError(job.getSolver(), e);
             throw e;
         }
     }
@@ -356,6 +355,36 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
         return account.getIntegerProperty(PROPERTY_ACCOUNT_LOGIN_TYPE, ACCOUNT_LOGIN_TYPE_AUTHTOKEN) == ACCOUNT_LOGIN_TYPE_AUTHTOKEN;
     }
 
+    /** Interprets an API flag that may be a JSON boolean or a numeric/string 1/0 as a boolean. */
+    private static boolean isApiTrue(final Object value) {
+        if (value instanceof Boolean) {
+            return ((Boolean) value).booleanValue();
+        } else if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        } else if (value instanceof String) {
+            return "1".equals(value) || "true".equalsIgnoreCase((String) value);
+        }
+        return false;
+    }
+
+    /**
+     * Returns the login types to try, in order. A login type that has already been established for this account is used exclusively;
+     * otherwise every applicable type is returned once (token login first, but only if the password looks like a token).
+     */
+    private List<Integer> getLoginTypesToTry(final Account account, final String password) {
+        final Number storedLoginType = (Number) account.getProperty(PROPERTY_ACCOUNT_LOGIN_TYPE);
+        final List<Integer> ret = new ArrayList<Integer>();
+        if (storedLoginType != null) {
+            ret.add(Integer.valueOf(storedLoginType.intValue()));
+            return ret;
+        }
+        if (this.looksLikeValidAPIKey(password)) {
+            ret.add(Integer.valueOf(ACCOUNT_LOGIN_TYPE_AUTHTOKEN));
+        }
+        ret.add(Integer.valueOf(ACCOUNT_LOGIN_TYPE_USER_AND_PASSWORD));
+        return ret;
+    }
+
     private Map<String, Object> callAPI(final Request req) throws IOException, PluginException {
         br.getPage(req);
         final Map<String, Object> entries = restoreFromString(br.getRequest().getHtmlCode(), TypeRef.MAP);
@@ -371,7 +400,20 @@ public class PluginForCaptchaSolverDeathByCaptcha extends abstractPluginForCaptc
         if (error == null) {
             return entries;
         }
-        throw new AccountInvalidException(error);
+        /*
+         * Docs: https://deathbycaptcha.com/api#api_details -- the JSON body alone (status/error) does not distinguish an account problem
+         * from a captcha problem, only the HTTP response code does: 403 = credentials rejected or insufficient credits (account,
+         * permanent), 400 = malformed request or invalid captcha image (captcha-level, not account), 503 = service overloaded
+         * (temporary), 500/other = internal server error (not the account's fault).
+         */
+        final int responseCode = br.getHttpConnection().getResponseCode();
+        if (responseCode == 403) {
+            throw new AccountInvalidException(error);
+        } else if (responseCode == 503) {
+            throw new AccountUnavailableException(error, 60 * 1000L);
+        } else {
+            throw new PluginException(LinkStatus.ERROR_CAPTCHA, error);
+        }
     }
 
     @Override

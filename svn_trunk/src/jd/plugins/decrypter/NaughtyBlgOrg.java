@@ -27,6 +27,8 @@ import org.appwork.utils.StringUtils;
 import org.jdownloader.captcha.v2.challenge.hcaptcha.CaptchaHelperCrawlerPluginHCaptcha;
 import org.jdownloader.captcha.v2.challenge.recaptcha.v2.CaptchaHelperCrawlerPluginRecaptchaV2;
 import org.jdownloader.plugins.components.antiDDoSForDecrypt;
+import org.jdownloader.plugins.components.config.NaughtyBlgOrgConfig;
+import org.jdownloader.plugins.components.config.NaughtyBlgOrgConfig.PreviewCrawlMode;
 
 import jd.PluginWrapper;
 import jd.controlling.ProgressController;
@@ -43,7 +45,7 @@ import jd.plugins.FilePackage;
 import jd.plugins.LinkStatus;
 import jd.plugins.PluginException;
 
-@DecrypterPlugin(revision = "$Revision: 53267 $", interfaceVersion = 5, names = {}, urls = {})
+@DecrypterPlugin(revision = "$Revision: 53362 $", interfaceVersion = 5, names = {}, urls = {})
 public class NaughtyBlgOrg extends antiDDoSForDecrypt {
     private enum Category {
         UNDEF,
@@ -183,26 +185,102 @@ public class NaughtyBlgOrg extends antiDDoSForDecrypt {
             /* Final fallback --> Scan complete html */
             contentReleaseLinks = br.getRequest().getHtmlCode();
         }
-        addLinks(HTMLParser.getHttpLinks(contentReleaseLinks, null), fp, dupes, ret);
+        /*
+         * Detect the "preview" links. Such links only lead to image galleries / previews rather than to the actual downloadable content.
+         * They are usually listed below an "All Previews:" heading and/or point to a known image-preview host (e.g. pixhost galleries).
+         */
+        final Set<String> previewURLs = new HashSet<String>();
+        final String previewsSection = br.getRegex(">\\s*All Previews\\s*:.*?(<div[^>]*\\bid\\s*=\\s*\"download\"[^>]*>.*?</div>)").getMatch(0);
+        if (previewsSection != null) {
+            final String[] previewSectionLinks = HTMLParser.getHttpLinks(previewsSection, null);
+            if (previewSectionLinks != null) {
+                for (final String url : previewSectionLinks) {
+                    previewURLs.add(url);
+                }
+            }
+        }
+        // Known image-preview hosts are always treated as preview links, wherever they appear on the page.
         // final String[] imgs = br.getRegex("(https://([\\w\\.]+)?pixhost\\.to/show/[^\"]+)").getColumn(0);
-        addLinks(br.getRegex("(https?://(?:[\\w\\.]+)?pixhost\\.to/show/[^\"\\'<>]+)").getColumn(0), fp, dupes, ret);
+        final String[] pixhostPreviews = br.getRegex("(https?://(?:[\\w\\.]+)?pixhost\\.(?:to|cc)/(?:show|gallery)/[^\"\\'<>]+)").getColumn(0);
+        if (pixhostPreviews != null) {
+            for (final String url : pixhostPreviews) {
+                previewURLs.add(url);
+            }
+        }
+        final boolean previewLinksAvailable = !previewURLs.isEmpty();
+        /* Collect all non captcha protected links and keep only those which are not preview links. */
+        final ArrayList<String> otherLinks = new ArrayList<String>();
+        final String[] freeLinks = HTMLParser.getHttpLinks(contentReleaseLinks, null);
+        if (freeLinks != null) {
+            for (final String url : freeLinks) {
+                if (!previewURLs.contains(url)) {
+                    otherLinks.add(url);
+                }
+            }
+        }
+        final String[] otherLinksArray = otherLinks.toArray(new String[0]);
+        final String[] previewLinksArray = previewURLs.toArray(new String[0]);
+        /*
+         * Decide - based on the configured PreviewCrawlMode - which links to add and whether the captcha protected spare links may be
+         * crawled at all. In AUTO mode (= default = old behavior) preview links are only added if no other links have been found.
+         */
+        final PreviewCrawlMode previewCrawlMode = get(getConfigInterface()).getPreviewCrawlMode();
+        final boolean allowSpareLinksCrawl;
+        switch (previewCrawlMode) {
+        case ALWAYS:
+            addLinks(otherLinksArray, fp, dupes, ret);
+            addLinks(previewLinksArray, fp, dupes, ret);
+            allowSpareLinksCrawl = true;
+            break;
+        case NEVER:
+            addLinks(otherLinksArray, fp, dupes, ret);
+            allowSpareLinksCrawl = true;
+            break;
+        case PREVIEW_ONLY:
+            /* Crawl only previews - but only if preview links have been found, otherwise fall back to the normal behavior. */
+            if (previewLinksAvailable) {
+                addLinks(previewLinksArray, fp, dupes, ret);
+                allowSpareLinksCrawl = false;
+            } else {
+                addLinks(otherLinksArray, fp, dupes, ret);
+                allowSpareLinksCrawl = true;
+            }
+            break;
+        case ONLY_IF_NO_OTHER_LINKS_ARE_FOUND:
+        case AUTO:
+        default:
+            addLinks(otherLinksArray, fp, dupes, ret);
+            if (ret.isEmpty()) {
+                addLinks(previewLinksArray, fp, dupes, ret);
+            }
+            allowSpareLinksCrawl = true;
+            break;
+        }
         /*
          * Step 2: Optionally crawl the "spare links" which are hidden behind a captcha. This is more expensive as it requires the user to
          * solve a captcha.
          */
-        // TODO: Replace this hardcoded boolean with a plugin setting.
+        /*
+         * Detect items where the freely accessible links only lead to image previews while the real download links are hidden behind the
+         * captcha. Such items use an "All Previews:" heading instead of the usual "Download:" heading. In this case the captcha must always
+         * be solved, otherwise the user would only end up with preview links.
+         */
+        final boolean onlyPreviewLinksWithoutCaptcha = br.containsHTML(">\\s*All Previews\\s*:");
         final boolean crawlSpareLinksBehindCaptcha;
-        if (ret.isEmpty()) {
+        if (!allowSpareLinksCrawl) {
+            logger.info("Not crawling captcha protected items because: PreviewCrawlMode is set to crawl previews only");
+            crawlSpareLinksBehindCaptcha = false;
+        } else if (ret.isEmpty()) {
             logger.info("Crawling captcha protected items because: Failed to find non protected items");
+            crawlSpareLinksBehindCaptcha = true;
+        } else if (onlyPreviewLinksWithoutCaptcha) {
+            logger.info("Crawling captcha protected items because: Without a captcha only preview links are available");
             crawlSpareLinksBehindCaptcha = true;
         } else if (StringUtils.endsWithCaseInsensitive(contenturl, "#nocaptcha")) {
             logger.info("Avoiding captcha because: User added #nocaptcha to URL");
             crawlSpareLinksBehindCaptcha = false;
-        } else if (true) {
-            // TODO: Add plugin setting
-            crawlSpareLinksBehindCaptcha = true;
         } else {
-            crawlSpareLinksBehindCaptcha = false;
+            crawlSpareLinksBehindCaptcha = get(getConfigInterface()).isCrawlCaptchaProtectedSpareLinks();
         }
         if (crawlSpareLinksBehindCaptcha) {
             final String downloadhidden = crawlSpareLinks();
@@ -280,6 +358,11 @@ public class NaughtyBlgOrg extends antiDDoSForDecrypt {
             throw new PluginException(LinkStatus.ERROR_PLUGIN_DEFECT);
         }
         return (String) response.get("content");
+    }
+
+    @Override
+    public Class<NaughtyBlgOrgConfig> getConfigInterface() {
+        return NaughtyBlgOrgConfig.class;
     }
 
     private String getFpName(String filePackageName) {
