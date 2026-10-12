@@ -37,6 +37,8 @@ public class SolverJob<T> {
     private final CopyOnWriteArraySet<ChallengeSolver<T>>        solverList;
     private LogSource                                            logger;
     private volatile SkipRequest                                 skipRequest;
+    private final CopyOnWriteArraySet<ChallengeSolver<?>>        solvingSet     = new CopyOnWriteArraySet<ChallengeSolver<?>>();
+    private final CopyOnWriteArraySet<ChallengeSolver<?>>        forcedStartSet = new CopyOnWriteArraySet<ChallengeSolver<?>>();
     private final AtomicInteger                                  LOCK        = new AtomicInteger();
     private final AtomicBoolean                                  alive       = new AtomicBoolean(true);
     private long                                                 created;
@@ -228,6 +230,10 @@ public class SolverJob<T> {
         }
     }
 
+    public long getCreated() {
+        return created;
+    }
+
     public Challenge<T> getChallenge() {
         return challenge;
     }
@@ -317,7 +323,57 @@ public class SolverJob<T> {
         }
     }
 
+    /**
+     * Marks the given solver as actually working on this job (it passed all its wait times and got its captcha slot). Solvers that are only
+     * waiting for other solvers are not marked.
+     */
+    public void setSolverSolving(final ChallengeSolver<?> solver) {
+        solvingSet.add(solver);
+        _notifyAll();
+    }
+
+    public boolean isSolverSolving(final ChallengeSolver<?> solver) {
+        return solvingSet.contains(solver);
+    }
+
+    /**
+     * Makes the given solver skip all its remaining wait times for other solvers, so it starts working on this job right now. Wakes up the
+     * solver if it is currently waiting.
+     */
+    public void forceStart(final ChallengeSolver<?> solver) {
+        if (forcedStartSet.add(solver)) {
+            log("Force start: " + solver);
+        }
+        _notifyAll();
+    }
+
+    public boolean isForcedStart(final ChallengeSolver<?> solver) {
+        return forcedStartSet.contains(solver);
+    }
+
+    /**
+     * Returns all external solvers of this job which are neither done nor working on it yet, i.e. which would still be used later if the
+     * captcha is not solved by the currently running (manual) solvers.
+     */
+    public List<ChallengeSolver<?>> getPendingExternalSolvers() {
+        final List<ChallengeSolver<?>> ret = new ArrayList<ChallengeSolver<?>>();
+        for (final ChallengeSolver<T> solver : getSolverList()) {
+            if (solver.getSolverType() == ChallengeSolver.SolverType.EXTERNAL && !isDone(solver) && !isSolverSolving(solver)) {
+                ret.add(solver);
+            }
+        }
+        return ret;
+    }
+
     public void waitFor(int timeout, ChallengeSolver<?>... instances) throws InterruptedException {
+        waitFor(null, timeout, instances);
+    }
+
+    /**
+     * @param waiter
+     *            the solver that waits (may be null). If {@link #forceStart(ChallengeSolver)} is called for it, the wait ends immediately.
+     */
+    public void waitFor(final ChallengeSolver<?> waiter, int timeout, ChallengeSolver<?>... instances) throws InterruptedException {
         long endTime = -1;
         if (timeout > 0) {
             endTime = Time.systemIndependentCurrentJVMTimeMillis() + timeout;
@@ -327,6 +383,10 @@ public class SolverJob<T> {
         }
         try {
             while (!areDone(instances)) {
+                if (waiter != null && isForcedStart(waiter)) {
+                    log(waiter + " wait aborted by force start");
+                    return;
+                }
                 if (isSolved()) {
                     throw new InterruptedException(this + " is Solved");
                 } else if (Thread.interrupted()) {

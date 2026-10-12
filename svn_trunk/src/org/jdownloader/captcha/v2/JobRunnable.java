@@ -89,6 +89,10 @@ public class JobRunnable<T> implements Runnable {
                     if (s == solver) {
                         continue;
                     }
+                    if (job.isForcedStart(solver)) {
+                        /* Forced start (e.g. user clicked "use external solver now" in the captcha dialog) -> do not wait any longer. */
+                        break;
+                    }
                     int waitForThisSolver = getWaitFor(solver.getService(), s.getService(), job);
                     waitForThisSolver -= (System.currentTimeMillis() - startedWaiting);
                     if (waitForThisSolver <= 0) {
@@ -105,7 +109,7 @@ public class JobRunnable<T> implements Runnable {
                         if (waitForThisSolver > 1000) {
                             long t = System.currentTimeMillis();
                             job.getLogger().info(solver + " now waits up to " + TimeFormatter.formatMilliSeconds(waitForThisSolver, 0) + " for " + s);
-                            job.waitFor(waitForThisSolver, s);
+                            job.waitFor(solver, waitForThisSolver, s);
                             job.getLogger().info(solver + " actually waited " + TimeFormatter.formatMilliSeconds(System.currentTimeMillis() - t, 0) + " for " + s);
                         }
                         continue;
@@ -136,6 +140,7 @@ public class JobRunnable<T> implements Runnable {
                 switch (ChallengeResponseController.getInstance().reserveCaptchaSlot(solver)) {
                 case RESERVED:
                     try {
+                        job.setSolverSolving(solver);
                         job.getLogger().info("Solver Start: " + solver);
                         solver.solve(job);
                     } finally {

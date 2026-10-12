@@ -229,6 +229,12 @@ public abstract class ChallengeDialogHandler<D extends AbstractCaptchaDialog<Res
             } catch (Exception e) {
             }
         }
+        if (dialog.getExternalSolverToUse() != null) {
+            /* User chose to use an external solver now: no result and no skip, this solver just ends without an answer. */
+            resultException = null;
+            result = null;
+            return;
+        }
         setResultFrom(dialog);
         try {
             if (dialog.getCloseReason() != CloseReason.OK) {
