@@ -2362,6 +2362,18 @@ public interface GuiTranslation extends TranslateInterface {
     @Default(lngs = { "en" }, values = { "Use external captcha solver instead?" })
     String AbstractCaptchaDialog_useExternalSolverQuestion();
 
+    @Default(lngs = { "en" }, values = { "Failed: %s1" })
+    String CESSolverJob_status_failed(String reason);
+
+    @Default(lngs = { "en" }, values = { "Timed out" })
+    String CESSolverJob_status_timedOut();
+
+    @Default(lngs = { "en" }, values = { "Aborted" })
+    String CESSolverJob_status_aborted();
+
+    @Default(lngs = { "en" }, values = { "Auto" })
+    String AbstractCaptchaDialog_autoSolver();
+
     @Default(lngs = { "en" }, values = { "Use external solver" })
     String AbstractCaptchaDialog_useExternalSolver();
 

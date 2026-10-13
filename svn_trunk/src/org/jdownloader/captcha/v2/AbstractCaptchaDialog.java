@@ -16,6 +16,7 @@ import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.awt.event.MouseMotionListener;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -774,12 +775,24 @@ public abstract class AbstractCaptchaDialog<T> extends AbstractDialog<T> {
         /* Dropdown + one button: the dialog does not grow with the number of configured external solvers. */
         final MigPanel selectPanel = new MigPanel("ins 0", "[][]", "[]");
         SwingUtils.setOpaque(selectPanel, false);
-        final JComboBox solverBox = new JComboBox(solvers.toArray());
+        /* "Auto" entry (only if there is a choice) is selected by default and means: the solver that would be used first anyway. */
+        final Object auto = new Object();
+        final List<Object> items = new ArrayList<Object>();
+        if (solvers.size() > 1) {
+            items.add(auto);
+        }
+        items.addAll(solvers);
+        final JComboBox solverBox = new JComboBox(items.toArray());
         solverBox.setRenderer(new DefaultListCellRenderer() {
             private static final long serialVersionUID = 1L;
 
             @Override
             public Component getListCellRendererComponent(final JList list, final Object value, final int index, final boolean isSelected, final boolean cellHasFocus) {
+                if (value == auto) {
+                    final JLabel autoLabel = (JLabel) super.getListCellRendererComponent(list, _GUI.T.AbstractCaptchaDialog_autoSolver(), index, isSelected, cellHasFocus);
+                    autoLabel.setIcon(NewTheme.I().getIcon(IconKey.ICON_OCR, 18));
+                    return autoLabel;
+                }
                 final SolverService service = ((ChallengeSolver<?>) value).getService();
                 final JLabel ret = (JLabel) super.getListCellRendererComponent(list, service.getName(), index, isSelected, cellHasFocus);
                 ret.setIcon(service.getIcon(18));
@@ -794,7 +807,9 @@ public abstract class AbstractCaptchaDialog<T> extends AbstractDialog<T> {
 
             @Override
             public void actionPerformed(final ActionEvent e) {
-                final ChallengeSolver<?> solver = (ChallengeSolver<?>) solverBox.getSelectedItem();
+                final Object selected = solverBox.getSelectedItem();
+                /* Auto = first solver of the list, i.e. the one that would be used first anyway. */
+                final ChallengeSolver<?> solver = selected == auto ? solvers.get(0) : (ChallengeSolver<?>) selected;
                 final SolverJob<?> job = challenge.getJob();
                 if (job.getLogger() != null) {
                     job.getLogger().info("User chose external solver " + solver + " in " + AbstractCaptchaDialog.this.getClass().getSimpleName() + " -> close dialog and start it now");
