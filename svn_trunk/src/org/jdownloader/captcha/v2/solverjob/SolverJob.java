@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -76,6 +77,20 @@ public class SolverJob<T> {
                 return _GUI.T.SolverJobStatus_UNSOLVED();
             }
         },
+        /** All solvers are done and every one of them delivered an answer that was rejected (see ValidationResult for the reasons). */
+        ANSWER_REJECTED {
+            @Override
+            public String getLabel() {
+                return _GUI.T.SolverJobStatus_ANSWER_REJECTED();
+            }
+        },
+        /** All solvers are done and every one of them failed because of an account problem (e.g. invalid API key, no balance). */
+        SOLVER_ACCOUNT_ERROR {
+            @Override
+            public String getLabel() {
+                return _GUI.T.SolverJobStatus_SOLVER_ACCOUNT_ERROR();
+            }
+        },
         /** The thread waiting for the job was interrupted, e.g. because downloads were stopped. */
         INTERRUPTED {
             @Override
@@ -85,30 +100,76 @@ public class SolverJob<T> {
         }
     }
 
-    private final Challenge<T>                                   challenge;
-    private final CaptchaSettings                                config;
-    private final ChallengeResponseController                    controller;
-    private volatile ArrayList<ResponseList<T>>                  cumulatedList;
-    private final HashSet<ChallengeSolver<T>>                    doneList    = new HashSet<ChallengeSolver<T>>();
-    private final AtomicReference<ChallengeSolverJobEventSender> eventSender = new AtomicReference<ChallengeSolverJobEventSender>();
-    private final List<AbstractResponse<T>>                      responses   = new ArrayList<AbstractResponse<T>>();
-    private final CopyOnWriteArraySet<ChallengeSolver<T>>        solverList;
-    private LogSource                                            logger;
-    private volatile SkipRequest                                 skipRequest;
-    private volatile boolean                                     interrupted;
-    private final CopyOnWriteArraySet<ChallengeSolver<?>>        solvingSet     = new CopyOnWriteArraySet<ChallengeSolver<?>>();
-    private final CopyOnWriteArraySet<ChallengeSolver<?>>        timedOutSet    = new CopyOnWriteArraySet<ChallengeSolver<?>>();
-    private final CopyOnWriteArraySet<ChallengeSolver<?>>        forcedStartSet = new CopyOnWriteArraySet<ChallengeSolver<?>>();
-    private final AtomicInteger                                  LOCK        = new AtomicInteger();
-    private final AtomicBoolean                                  alive       = new AtomicBoolean(true);
-    private long                                                 created;
+    /** What happened to a single solver while it worked on a job, see {@link SolverJob#getSolverResult(ChallengeSolver)}. */
+    public enum SolverOutcome {
+        /** The solver delivered an answer that the job accepted. */
+        ANSWERED,
+        /** The solver delivered an answer but the job rejected it (e.g. it arrived too late or was invalid). */
+        ANSWER_REJECTED,
+        /** The solver or the whole job ran into a timeout before the solver delivered an answer. */
+        TIMED_OUT,
+        /** The solver was stopped from outside (job skipped/aborted, solved by another solver). */
+        ABORTED,
+        /** The solver could not solve the captcha (a problem of the captcha, not of the solver or its account). */
+        UNSOLVABLE,
+        /** The solver failed because of an account problem (e.g. invalid API key, no balance). */
+        SOLVER_ERROR_ACCOUNT,
+        /** The solver failed for any other reason (e.g. error of the solver service). */
+        SOLVER_ERROR,
+        /** The solver was not started at all (e.g. custom limit reached, no free captcha slot). */
+        NOT_STARTED
+    }
+
+    /** Outcome of a single solver plus the (optional) detailed message, e.g. the error text of the solver service. */
+    public static class SolverResult {
+        private final SolverOutcome outcome;
+        private final String        message;
+
+        public SolverResult(final SolverOutcome outcome, final String message) {
+            this.outcome = outcome;
+            this.message = message;
+        }
+
+        public SolverOutcome getOutcome() {
+            return outcome;
+        }
+
+        /** Detailed message or null if there is none. */
+        public String getMessage() {
+            return message;
+        }
+
+        @Override
+        public String toString() {
+            return message != null ? outcome + ": " + message : outcome.name();
+        }
+    }
+
+    private final Challenge<T>                                        challenge;
+    private final CaptchaSettings                                     config;
+    private final ChallengeResponseController                         controller;
+    private volatile ArrayList<ResponseList<T>>                       cumulatedList;
+    private final HashSet<ChallengeSolver<T>>                         doneList              = new HashSet<ChallengeSolver<T>>();
+    private final AtomicReference<ChallengeSolverJobEventSender>      eventSender           = new AtomicReference<ChallengeSolverJobEventSender>();
+    private final List<AbstractResponse<T>>                           responses             = new ArrayList<AbstractResponse<T>>();
+    private final CopyOnWriteArraySet<ChallengeSolver<T>>             solverList;
+    private LogSource                                                 logger;
+    private volatile SkipRequest                                      skipRequest;
+    private volatile boolean                                          interrupted;
+    private final ConcurrentHashMap<ChallengeSolver<?>, SolverResult> solverResults         = new ConcurrentHashMap<ChallengeSolver<?>, SolverResult>();
+    private final CopyOnWriteArraySet<ChallengeSolver<?>>             solvingSet            = new CopyOnWriteArraySet<ChallengeSolver<?>>();
+    private final CopyOnWriteArraySet<ChallengeSolver<?>>             timedOutSet           = new CopyOnWriteArraySet<ChallengeSolver<?>>();
+    private final CopyOnWriteArraySet<ChallengeSolver<?>>             forcedStartSet        = new CopyOnWriteArraySet<ChallengeSolver<?>>();
+    private final AtomicInteger                                       LOCK                  = new AtomicInteger();
+    private final AtomicBoolean                                       alive                 = new AtomicBoolean(true);
+    private long                                                      created;
     /**
      * Random tie-break ordinal per external solver id, drawn once per job (see {@link #getExternalTieBreakOrder(String)}). Used by
      * {@link org.jdownloader.captcha.v2.JobRunnable#getDefaultWaitFor} to pick, at random for this one captcha, which of several equally
      * ranked external solvers is tried first.
      */
-    private final HashMap<String, Integer>                       externalTieBreakOrder = new HashMap<String, Integer>();
-    private static final Random                                  TIEBREAK_RANDOM       = new Random();
+    private final HashMap<String, Integer>                            externalTieBreakOrder = new HashMap<String, Integer>();
+    private static final Random                                       TIEBREAK_RANDOM       = new Random();
 
     public String toString() {
         return "CaptchaJob: " + new Date(created) + " " + challenge + " Solver: " + solverList;
@@ -138,8 +199,13 @@ public class SolverJob<T> {
     }
 
     public boolean addAnswer(AbstractResponse<T> abstractResponse) {
-        if (!abstractResponse.getChallenge().validateResponse(abstractResponse)) {
-            abstractResponse.setValidation(ValidationResult.INVALID);
+        final ValidationResult validation = abstractResponse.getChallenge().validateResponse(abstractResponse);
+        if (validation != ValidationResult.VALID) {
+            if (abstractResponse.getSolver() instanceof ChallengeSolver) {
+                /* Only the first result of a solver counts, so this detailed reason wins over the generic one set by the solver later. */
+                setSolverResult((ChallengeSolver<?>) abstractResponse.getSolver(), SolverOutcome.ANSWER_REJECTED, validation.getLabel());
+            }
+            abstractResponse.setValidation(validation);
             return false;
         }
         boolean kill = false;
@@ -415,6 +481,59 @@ public class SolverJob<T> {
     /** Marks the solver as stopped because of its own timeout (see JobRunnable#fireTimeoutEvent). Call before the solver is killed. */
     public void setSolverTimedOut(final ChallengeSolver<?> solver) {
         timedOutSet.add(solver);
+        setSolverResult(solver, SolverOutcome.TIMED_OUT, null);
+    }
+
+    /**
+     * Records what happened to the given solver in this job. Only the first result of a solver counts, so a root cause (e.g. an error) is
+     * not overwritten by the generic "aborted" that follows when the solver is torn down.
+     *
+     * @param message
+     *            Detailed message (e.g. error text of the solver service) or null
+     */
+    public void setSolverResult(final ChallengeSolver<?> solver, final SolverOutcome outcome, final String message) {
+        if (solverResults.putIfAbsent(solver, new SolverResult(outcome, message)) == null) {
+            logSolverStatus(solver, "RESULT " + (message != null ? outcome + " (" + message + ")" : outcome.name()));
+        }
+    }
+
+    /** Returns what happened to the given solver in this job, or null if nothing was recorded (yet). */
+    public SolverResult getSolverResult(final ChallengeSolver<?> solver) {
+        return solverResults.get(solver);
+    }
+
+    /**
+     * Returns a complete, human readable description of the current status of this job, ready to be shown or logged. It always starts with
+     * the label of {@link #getStatus()}. If the job is {@link SolverJobStatus#UNSOLVED}, {@link SolverJobStatus#ANSWER_REJECTED} or
+     * {@link SolverJobStatus#SOLVER_ACCOUNT_ERROR}, the results of its solvers are appended to explain why (with a single solver just its result, with several solvers one entry per solver), e.g. "Unsolved: UNSOLVABLE: error text of the
+     * solver service".
+     */
+    public String getStatusDetail() {
+        final SolverJobStatus status = getStatus();
+        switch (status) {
+        case UNSOLVED:
+        case ANSWER_REJECTED:
+        case SOLVER_ACCOUNT_ERROR:
+            break;
+        default:
+            return status.getLabel();
+        }
+        /* Combine status of all solvers although in most cases, that list will contain exactly one element. */
+        final StringBuilder sb = new StringBuilder();
+        for (final ChallengeSolver<T> solver : solverList) {
+            final SolverResult result = solverResults.get(solver);
+            if (result == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append("; ");
+            }
+            if (solverList.size() > 1) {
+                sb.append(solver).append(" -> ");
+            }
+            sb.append(result);
+        }
+        return sb.length() > 0 ? status.getLabel() + ": " + sb : status.getLabel();
     }
 
     /**
@@ -555,16 +674,48 @@ public class SolverJob<T> {
             return SolverJobStatus.INTERRUPTED;
         }
         if (isDone()) {
-            /*
-             * Every solver ran into its own timeout: The job itself did not get a skip request (its own timeout was not reached or the
-             * solvers were faster), but from the outside this is still a timeout.
-             */
-            if (solverList.size() > 0 && timedOutSet.containsAll(solverList)) {
-                return SolverJobStatus.TIMEOUT;
+            final SolverOutcome uniformOutcome = getUniformOutcome();
+            if (uniformOutcome != null) {
+                switch (uniformOutcome) {
+                case TIMED_OUT:
+                    /*
+                     * Every solver ran into its own timeout: The job itself did not get a skip request (its own timeout was not reached
+                     * or the solvers were faster), but from the outside this is still a timeout.
+                     */
+                    return SolverJobStatus.TIMEOUT;
+                case ANSWER_REJECTED:
+                    return SolverJobStatus.ANSWER_REJECTED;
+                case SOLVER_ERROR_ACCOUNT:
+                    return SolverJobStatus.SOLVER_ACCOUNT_ERROR;
+                default:
+                    break;
+                }
             }
             return SolverJobStatus.UNSOLVED;
         }
         return SolverJobStatus.RUNNING;
+    }
+
+    /**
+     * Returns the outcome that all solvers of this job have in common, or null if there are no solvers, a solver has no result yet or the
+     * solvers ended up with different outcomes.
+     */
+    public SolverOutcome getUniformOutcome() {
+        if (solverList.size() == 0) {
+            return null;
+        }
+        SolverOutcome uniform = null;
+        for (final ChallengeSolver<T> solver : solverList) {
+            final SolverResult result = solverResults.get(solver);
+            if (result == null) {
+                return null;
+            } else if (uniform == null) {
+                uniform = result.getOutcome();
+            } else if (uniform != result.getOutcome()) {
+                return null;
+            }
+        }
+        return uniform;
     }
 
     public boolean setSkipRequest(SkipRequest skipRequest) {
@@ -606,7 +757,6 @@ public class SolverJob<T> {
                     response.setValidation(ValidationResult.VALID);
                 } else {
                     // unused responses
-                    // maybe send invalid instead?
                     response.setValidation(ValidationResult.UNUSED);
                 }
             }
