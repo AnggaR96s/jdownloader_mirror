@@ -158,6 +158,9 @@ public class SolverJob<T> {
     private volatile boolean                                          interrupted;
     private final ConcurrentHashMap<ChallengeSolver<?>, SolverResult> solverResults         = new ConcurrentHashMap<ChallengeSolver<?>, SolverResult>();
     private final CopyOnWriteArraySet<ChallengeSolver<?>>             solvingSet            = new CopyOnWriteArraySet<ChallengeSolver<?>>();
+    /* Time stamps (ms) of when a solver started working on this job (see setSolverSolving) and of when it was done (see setSolverDone). */
+    private final ConcurrentHashMap<ChallengeSolver<?>, Long>         solvingStartTimes     = new ConcurrentHashMap<ChallengeSolver<?>, Long>();
+    private final ConcurrentHashMap<ChallengeSolver<?>, Long>         solvingEndTimes       = new ConcurrentHashMap<ChallengeSolver<?>, Long>();
     private final CopyOnWriteArraySet<ChallengeSolver<?>>             timedOutSet           = new CopyOnWriteArraySet<ChallengeSolver<?>>();
     private final CopyOnWriteArraySet<ChallengeSolver<?>>             forcedStartSet        = new CopyOnWriteArraySet<ChallengeSolver<?>>();
     private final AtomicInteger                                       LOCK                  = new AtomicInteger();
@@ -307,7 +310,8 @@ public class SolverJob<T> {
                     return;
                 }
             }
-            logSolverStatus(solver, "DONE (" + doneList.size() + "/" + solverList.size() + " solvers done)");
+            solvingEndTimes.putIfAbsent(solver, Long.valueOf(System.currentTimeMillis()));
+            logSolverStatus(solver, "DONE (" + doneList.size() + "/" + solverList.size() + " solvers done) | " + getSolverTimesText(solver));
             final ChallengeSolverJobEventSender eventSender = getEventSender(false);
             if (eventSender != null) {
                 eventSender.fireEvent(new ChallengeSolverJobEvent(this, ChallengeSolverJobEvent.Type.SOLVER_DONE, solver));
@@ -473,9 +477,39 @@ public class SolverJob<T> {
      */
     public void setSolverSolving(final ChallengeSolver<?> solver) {
         if (solvingSet.add(solver)) {
+            solvingStartTimes.putIfAbsent(solver, Long.valueOf(System.currentTimeMillis()));
             logSolverStatus(solver, "SOLVING (wait times over, captcha slot reserved)");
         }
         _notifyAll();
+    }
+
+    /**
+     * Returns how long the given solver actually worked on this job (from the moment it started solving until it was done, or until now
+     * if it is still working), regardless of how it ended (answer, error, timeout, skipped/aborted by the user). Returns -1 if the solver
+     * never started solving (e.g. it was only waiting for other solvers or was not started at all).
+     */
+    public long getSolverWorkingMillis(final ChallengeSolver<?> solver) {
+        final Long start = solvingStartTimes.get(solver);
+        if (start == null) {
+            return -1;
+        }
+        final Long end = solvingEndTimes.get(solver);
+        return (end != null ? end.longValue() : System.currentTimeMillis()) - start.longValue();
+    }
+
+    /** Text for the log: working time of the solver and how long it waited (for other solvers) before it started. */
+    private String getSolverTimesText(final ChallengeSolver<?> solver) {
+        final long working = getSolverWorkingMillis(solver);
+        final Long start = solvingStartTimes.get(solver);
+        if (working < 0 || start == null) {
+            /* Never started: the whole time in the job was waiting. */
+            return "solver time: not started, waited " + formatSeconds(System.currentTimeMillis() - created);
+        }
+        return "solver time: " + formatSeconds(working) + ", waited " + formatSeconds(start.longValue() - created) + " before start";
+    }
+
+    private static String formatSeconds(final long millis) {
+        return (Math.max(0, millis) / 100 / 10d) + "s";
     }
 
     /** Marks the solver as stopped because of its own timeout (see JobRunnable#fireTimeoutEvent). Call before the solver is killed. */
