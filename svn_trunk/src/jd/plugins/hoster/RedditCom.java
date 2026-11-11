@@ -63,7 +63,7 @@ import jd.plugins.PluginForHost;
 import jd.plugins.components.PluginJSonUtils;
 import jd.plugins.decrypter.RedditComCrawler;
 
-@HostPlugin(revision = "$Revision: 53895 $", interfaceVersion = 3, names = {}, urls = {})
+@HostPlugin(revision = "$Revision: 53944 $", interfaceVersion = 3, names = {}, urls = {})
 public class RedditCom extends PluginForHost {
     public RedditCom(PluginWrapper wrapper) {
         super(wrapper);
@@ -369,15 +369,21 @@ public class RedditCom extends PluginForHost {
             final Browser brc = br.cloneBrowser();
             brc.setFollowRedirects(true);
             con = brc.openHeadConnection(url);
-            if (con.getResponseCode() == 404 && url.matches("(?i).+\\.jpg$")) {
+            if (con.getResponseCode() == 404) {
                 brc.followConnection(true);
-                urlAutoCorrect = url.replaceFirst("(?i)\\.jpg$", ".jpeg");
-                con = brc.openHeadConnection(urlAutoCorrect);
+                if (url.matches("(?i).+\\.jpg$")) {
+                    urlAutoCorrect = url.replaceFirst("(?i)\\.jpg$", ".jpeg");
+                    con = brc.openHeadConnection(urlAutoCorrect);
+                } else if (url.matches("(?i).+\\.jpeg$")) {
+                    urlAutoCorrect = url.replaceFirst("(?i)\\.jpeg$", ".jpg");
+                    con = brc.openHeadConnection(urlAutoCorrect);
+                }
             }
             this.connectionErrorhandling(brc, con);
             if (con.getCompleteContentLength() > 0) {
                 if (urlAutoCorrect != null && link.getPluginPatternMatcher().equals(url)) {
                     // auto fix jpg to jpeg
+                    logger.info("Applying jpg/jpeg auto fix -> " + urlAutoCorrect);
                     link.setPluginPatternMatcher(urlAutoCorrect);
                 }
                 if (con.isContentDecoded()) {
